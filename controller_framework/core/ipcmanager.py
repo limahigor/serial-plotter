@@ -1,7 +1,10 @@
+import logging
 import multiprocessing as mp
 from queue import Empty
 import threading
 import time
+
+from .logmanager import LogManager
 
 # {
 #     "type": "update_variable",
@@ -19,6 +22,9 @@ class IPCManager:
         assert isinstance(app_manager, AppManager)
         self.core = app_manager
 
+        self.log_manager = LogManager('IPC', logging.DEBUG)
+        self.log = self.log_manager.get_logger(component='IPC')
+
         self.tx_queue: mp.Queue = queue_to_gui
         self.rx_queue: mp.Queue = queue_from_gui
 
@@ -33,20 +39,28 @@ class IPCManager:
         }
 
     def __run(self):
-        print('[IPC] started')
+        self.log.info('started', extra={'method':'run'})
         while not self.stop_event.is_set():
-            self.__parse_command()
             self.__send_full_state()
-
-            time.sleep(0.1)
+            time.sleep(0.03)
 
     def init(self):
-        self.thread = threading.Thread(target=self.__run)
-        self.thread.start()
+        self.thread_send = threading.Thread(target=self.__run, daemon=True)
+        self.thread_recv = threading.Thread(target=self.__parse_command, daemon=True)
+        self.thread_send.start()
+        self.thread_recv.start()
 
     def stop(self):
         self.stop_event.set()
-        self.thread.join()
+        self.thread_send.join()
+        self.thread_recv.join()
+
+        self.tx_queue.close()
+        self.rx_queue.close()
+
+        self.tx_queue.cancel_join_thread()
+        self.rx_queue.cancel_join_thread()
+        self.log.info('stopped')
 
     def __send(self, command, payload):
         data = {"type": command, "payload": payload}
@@ -56,44 +70,52 @@ class IPCManager:
     def __send_full_state(self):
         command = "full_state"
         payload = {
-            "sensor_a": self.core.sensor_a,
-            "sensor_b": self.core.sensor_b,
-            "duty1": self.core.duty1,
-            "duty2": self.core.duty2,
-            "setpoint": self.core.setpoint,
+            "sensors": [values.copy() for values in self.core.sensor_cache],
+            "actuators": [values.copy() for values in self.core.actuator_cache],
+            "setpoints": self.core.setpoints,
             "running_instance": self.core.running_instance,
             "control_instances": self.core.control_instances,
+            "cache_timestamp": self.core.timestamp_cache.copy(),
         }
 
-        self.__send(
-            command, payload
-        )
+        self.__send(command, payload)
+
+        for values in self.core.sensor_cache:
+            values.clear()
+
+        for values in self.core.actuator_cache:
+            values.clear()
+
+        self.core.timestamp_cache.clear()
 
     def __parse_command(self):
-        try:
-            data = self.rx_queue.get_nowait()
-            command = data.get("type")
-            payload = data.get("payload", {})
-            print(f"[IPC] {command} recebido com payload: {payload}")
+        while not self.stop_event.is_set():
+            try:
+                data = self.rx_queue.get_nowait()
+                command = data.get("type")
+                payload = data.get("payload", {})
+                self.log.debug("%s recebido com payload: %s", command, payload, extra={'method':'parse'})
 
-            if not command:
-                print("[IPC] Comando sem 'type'. Ignorado.")
-                return
+                if not command:
+                    self.log.warning("Comando sem 'type'. Ignorado.", extra={'method':'parse'})
+                    return
 
-            handler = self.command_registry.get(command)
-            if not handler:
-                print(f"[IPC] Comando '{command}' não registrado.")
-                return
+                handler = self.command_registry.get(command)
+                if not handler:
+                    self.log.warning("Comando '%s' não registrado.", command, extra={'method':'parse'})
+                    return
 
-            handler(self.core, payload)
+                handler(self.core, payload)
 
-        except Empty:
-            pass
-        except ValueError as e:
-            print(f"[IPC] Erro de validação: {e}")
-        except Exception as e:
-            print(f"[IPC] Erro ao executar comando '{command}': {e}")
-            print(f"[IPC] Dados recebidos: {data}")
+            except Empty:
+                pass
+            except ValueError as e:
+                self.log.error("Erro de validação: %s", e, extra={'method':'parse'})
+            except Exception as e:
+                self.log.error("[IPC] Erro ao executar comando '%s': %s", command, e,    extra={'method':'parse'})
+                self.log.debug("[IPC] Dados recebidos: %s", data, extra={'method':'parse'})
+
+            time.sleep(0.01)
 
     def handler_update_variable(self, core, payload):
         control_name = payload.get("control_name")
@@ -123,7 +145,7 @@ class IPCManager:
         if not value:
             raise ValueError("[IPC] update_setpoint exige 'value'")
 
-        if not isinstance(value, (int, float)):
+        if not isinstance(value, (list)):
             raise ValueError(
                 "[IPC] 'value' para 'update_setpoint' deve ser int ou float"
             )

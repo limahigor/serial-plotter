@@ -1,10 +1,14 @@
+import logging
 import sys
 
-from PySide6 import QtCore
+from PySide6 import QtCore, QtGui
 from PySide6.QtWidgets import QTabWidget, QApplication, QMainWindow
+
+from controller_framework.core.logmanager import LogManager
 
 from .plotter_gui import PlotterGUI
 from .analyzer_gui import AnalyzerGUI
+
 
 class MainGUI(QMainWindow):
     def __init__(self, app_mirror):
@@ -13,6 +17,9 @@ class MainGUI(QMainWindow):
         from controller_framework.core import AppManager
         assert isinstance(app_mirror, AppManager)
         self.app_mirror = app_mirror
+
+        self.log_manager = LogManager('MainGUI', logging.DEBUG)
+        self.log = self.log_manager.get_logger(component='MainGUI')
 
         self.setWindowTitle("Control System GUI")
         self.setGeometry(100, 100, 1200, 800)
@@ -25,11 +32,15 @@ class MainGUI(QMainWindow):
 
         self.tabs.addTab(self.plotter_gui, "PLOTTER")
         self.tabs.addTab(self.analyzer_gui, "ANALYZER")
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
         self.hide_mode = False
 
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.installEventFilter(self)
+
+        self.esc_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Escape), self)
+        self.esc_shortcut.activated.connect(self.close_gui)
 
         self.plotter_gui.command_triggered.connect(self.send_command)
 
@@ -46,23 +57,27 @@ class MainGUI(QMainWindow):
     def start_gui(app_mirror):
         app = QApplication(sys.argv)
         window = MainGUI(app_mirror)
-        window.showFullScreen()
-        print('[GUI] started')
+        window.showMaximized()
         sys.exit(app.exec())
 
-    def key_press_handle(self, super_press_handler, ev):
-        if ev.key() == QtCore.Qt.Key_Escape:
+    def close_gui(self):
+        res = self.plotter_gui.close()
+        if res:
             sys.exit(0)
-        elif ev.key() == QtCore.Qt.Key_F or ev.key() == 16777216:
+
+    def key_press_handle(self, super_press_handler, ev):
+        if ev.key() == QtCore.Qt.Key.Key_Escape:
+            sys.exit(0)
+        elif ev.key() == QtCore.Qt.Key.Key_F or ev.key() == 16777216:
             self.toggle_hide_mode()
 
     def toggle_hide_mode(self):
         if self.hide_mode:
             if self.tabs.currentIndex() == 0:
                 self.plotter_gui.sidebar.show()
-                self.plotter_gui.layout.insertWidget(0, self.plotter_gui.sidebar, 1)
-                self.plotter_gui.layout.setStretchFactor(self.plotter_gui.sidebar, 1)
-                self.plotter_gui.layout.setStretchFactor(
+                self.plotter_gui.main_layout.insertWidget(0, self.plotter_gui.sidebar, 1)
+                self.plotter_gui.main_layout.setStretchFactor(self.plotter_gui.sidebar, 1)
+                self.plotter_gui.main_layout.setStretchFactor(
                     self.plotter_gui.plotter_gui, 4
                 )
             elif self.tabs.currentIndex() == 1:
@@ -81,6 +96,15 @@ class MainGUI(QMainWindow):
                 self.analyzer_gui.layout.setStretchFactor(self.analyzer_gui, 5)
         self.hide_mode = not self.hide_mode
 
+    def on_tab_changed(self, index):
+        self.plotter_gui.toggle_select(index == 0)
+
+    def closeEvent(self, event):
+        self.log.info("Fechando janela principal")
+        self.close_gui()
+        QApplication.quit()
+        event.accept()
+
     @QtCore.Slot(str, object)
     def send_command(self, command, value):
         data = {
@@ -89,4 +113,4 @@ class MainGUI(QMainWindow):
         }
         
         self.app_mirror.queue_from_gui.put(data)
-        print(f"[MainGUI] Enviou '{command}' com valor {value} para o [APP]")
+        self.log.debug(f"Enviou '{command}' com valor {value} para o [APP]", extra={'method':'send command'})
