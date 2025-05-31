@@ -1,11 +1,16 @@
 from abc import ABC, abstractmethod
 from enum import Enum
-import random
+from typing import Tuple
+import socket
 import struct
 import time
-import numpy as np
 import serial
 from pyocd.core.helpers import ConnectHelper, Session
+
+import socket
+import struct
+import time
+import errno
 
 from .logmanager import LogManager
 
@@ -14,6 +19,7 @@ class MCUType(Enum):
     STM32 = "STM32"
     RDATA = "RDATA"
     TCLAB = "TCLAB"
+    VIRUTAL = "VIRTUAL"
 
 
 class MCUDriver(ABC):
@@ -29,7 +35,7 @@ class MCUDriver(ABC):
         pass
 
     @abstractmethod
-    def read(self):
+    def read(self) -> Tuple[tuple, tuple]:
         pass
 
     @abstractmethod
@@ -41,7 +47,8 @@ class MCUDriver(ABC):
         driver_map = {
             MCUType.RDATA: RandomDataDriver,
             MCUType.STM32: STM32Driver,
-            MCUType.TCLAB: TCLABDriver
+            MCUType.TCLAB: TCLABDriver,
+            MCUType.VIRUTAL: VirtualBallNPlate,
         }
 
         if mcu_type not in driver_map:
@@ -82,7 +89,7 @@ class STM32Driver(MCUDriver):
                (out1, out2)
 
     def connect(self):
-        self.ser = ConnectHelper.session_with_chosen_probe(target_override="stm32f103c8", connect_mode="attach")
+        self.ser = ConnectHelper.session_with_chosen_probe(target_override="STM32F103RC", connect_mode="attach")
         self.ram = self.ser.target.get_memory_map()[1]
         self.ser.open()
 
@@ -132,6 +139,7 @@ class RandomDataDriver(MCUDriver):
         dT = (P - (T_current - self.Tamb)/self.Rth) * (self.dt / self.Cth)
         return T_current + dT
 
+
 class TCLABDriver(MCUDriver):
     def __init__(self, mcu_type, timeout=0.1, **kwargs):
         super().__init__(mcu_type, **kwargs)
@@ -158,3 +166,51 @@ class TCLABDriver(MCUDriver):
 
     def send(self, out1=0.0, out2=0.0):
         self.ser.write(f"SET_PWM:{out1},{out2}\n".encode())
+
+
+class VirtualBallNPlate(MCUDriver):
+    def __init__(self, mcu_type, **kwargs):
+        super().__init__(mcu_type, **kwargs)
+
+        self.udp_addr    = ("0.0.0.0", 5007)
+        self.buffer_size = 1024
+        self.sock        = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 64 * 1024)
+
+        self.x, self.y = 0.0, 0.0
+        self._buf      = bytearray(self.buffer_size)
+        self._connected = False
+
+    def connect(self):
+        if not self._connected:
+            try:
+                self.sock.bind(self.udp_addr)
+            except OSError as e:
+                if e.errno not in (errno.EADDRINUSE,):
+                    raise
+            self.sock.setblocking(False)
+            self._connected = True
+
+    def read(self):
+        try:
+            while True:
+                nbytes, _ = self.sock.recvfrom_into(self._buf)
+
+                if nbytes == 8:
+                    self.x, self.y = struct.unpack('!ff', self._buf[:8])
+                else:
+                    text = self._buf[:nbytes].decode(errors='ignore').strip()
+                    try:
+                        px, py = text.split(',')
+                        self.x, self.y = float(px), float(py)
+                    except ValueError:
+                        continue
+        except BlockingIOError:
+            pass
+
+        return (self.x, self.y), (0.0, 0.0)
+    
+    def send(self, *outs):
+        pass

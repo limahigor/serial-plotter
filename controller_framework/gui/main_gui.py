@@ -1,7 +1,7 @@
 import logging
 import sys
 
-from PySide6 import QtCore
+from PySide6 import QtCore, QtGui
 from PySide6.QtWidgets import QTabWidget, QApplication, QMainWindow
 
 from controller_framework.core.logmanager import LogManager
@@ -39,6 +39,9 @@ class MainGUI(QMainWindow):
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.installEventFilter(self)
 
+        self.esc_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Escape), self)
+        self.esc_shortcut.activated.connect(self.close_gui)
+
         self.plotter_gui.command_triggered.connect(self.send_command)
 
     def eventFilter(self, obj, event):
@@ -54,22 +57,27 @@ class MainGUI(QMainWindow):
     def start_gui(app_mirror):
         app = QApplication(sys.argv)
         window = MainGUI(app_mirror)
-        window.showFullScreen()
+        window.showMaximized()
         sys.exit(app.exec())
 
-    def key_press_handle(self, super_press_handler, ev):
-        if ev.key() == QtCore.Qt.Key_Escape:
+    def close_gui(self):
+        res = self.plotter_gui.close()
+        if res:
             sys.exit(0)
-        elif ev.key() == QtCore.Qt.Key_F or ev.key() == 16777216:
+
+    def key_press_handle(self, super_press_handler, ev):
+        if ev.key() == QtCore.Qt.Key.Key_Escape:
+            sys.exit(0)
+        elif ev.key() == QtCore.Qt.Key.Key_F or ev.key() == 16777216:
             self.toggle_hide_mode()
 
     def toggle_hide_mode(self):
         if self.hide_mode:
             if self.tabs.currentIndex() == 0:
                 self.plotter_gui.sidebar.show()
-                self.plotter_gui.layout.insertWidget(0, self.plotter_gui.sidebar, 1)
-                self.plotter_gui.layout.setStretchFactor(self.plotter_gui.sidebar, 1)
-                self.plotter_gui.layout.setStretchFactor(
+                self.plotter_gui.main_layout.insertWidget(0, self.plotter_gui.sidebar, 1)
+                self.plotter_gui.main_layout.setStretchFactor(self.plotter_gui.sidebar, 1)
+                self.plotter_gui.main_layout.setStretchFactor(
                     self.plotter_gui.plotter_gui, 4
                 )
             elif self.tabs.currentIndex() == 1:
@@ -90,6 +98,12 @@ class MainGUI(QMainWindow):
 
     def on_tab_changed(self, index):
         self.plotter_gui.toggle_select(index == 0)
+
+    def closeEvent(self, event):
+        self.log.info("Fechando janela principal")
+        self.close_gui()
+        QApplication.quit()
+        event.accept()
 
     @QtCore.Slot(str, object)
     def send_command(self, command, value):

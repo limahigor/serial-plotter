@@ -41,21 +41,26 @@ class IPCManager:
     def __run(self):
         self.log.info('started', extra={'method':'run'})
         while not self.stop_event.is_set():
-            self.__parse_command()
-
-            if self.core.data_updated:
-                self.__send_full_state()
-                self.core.data_updated = False
-
-            time.sleep(0.1)
+            self.__send_full_state()
+            time.sleep(0.03)
 
     def init(self):
-        self.thread = threading.Thread(target=self.__run)
-        self.thread.start()
+        self.thread_send = threading.Thread(target=self.__run, daemon=True)
+        self.thread_recv = threading.Thread(target=self.__parse_command, daemon=True)
+        self.thread_send.start()
+        self.thread_recv.start()
 
     def stop(self):
         self.stop_event.set()
-        self.thread.join()
+        self.thread_send.join()
+        self.thread_recv.join()
+
+        self.tx_queue.close()
+        self.rx_queue.close()
+
+        self.tx_queue.cancel_join_thread()
+        self.rx_queue.cancel_join_thread()
+        self.log.info('stopped')
 
     def __send(self, command, payload):
         data = {"type": command, "payload": payload}
@@ -65,43 +70,52 @@ class IPCManager:
     def __send_full_state(self):
         command = "full_state"
         payload = {
-            "sensors": self.core.get_sensor_values(),
-            "actuators": self.core.get_actuator_values(),
+            "sensors": [values.copy() for values in self.core.sensor_cache],
+            "actuators": [values.copy() for values in self.core.actuator_cache],
             "setpoints": self.core.setpoints,
             "running_instance": self.core.running_instance,
             "control_instances": self.core.control_instances,
-            "last_timestamp": self.core.last_timestamp,
+            "cache_timestamp": self.core.timestamp_cache.copy(),
         }
 
-        self.__send(
-            command, payload
-        )
+        self.__send(command, payload)
+
+        for values in self.core.sensor_cache:
+            values.clear()
+
+        for values in self.core.actuator_cache:
+            values.clear()
+
+        self.core.timestamp_cache.clear()
 
     def __parse_command(self):
-        try:
-            data = self.rx_queue.get_nowait()
-            command = data.get("type")
-            payload = data.get("payload", {})
-            self.log.debug("%s recebido com payload: %s", command, payload, extra={'method':'parse'})
+        while not self.stop_event.is_set():
+            try:
+                data = self.rx_queue.get_nowait()
+                command = data.get("type")
+                payload = data.get("payload", {})
+                self.log.debug("%s recebido com payload: %s", command, payload, extra={'method':'parse'})
 
-            if not command:
-                self.log.warning("Comando sem 'type'. Ignorado.", extra={'method':'parse'})
-                return
+                if not command:
+                    self.log.warning("Comando sem 'type'. Ignorado.", extra={'method':'parse'})
+                    return
 
-            handler = self.command_registry.get(command)
-            if not handler:
-                self.log.warning("Comando '%s' não registrado.", command, extra={'method':'parse'})
-                return
+                handler = self.command_registry.get(command)
+                if not handler:
+                    self.log.warning("Comando '%s' não registrado.", command, extra={'method':'parse'})
+                    return
 
-            handler(self.core, payload)
+                handler(self.core, payload)
 
-        except Empty:
-            pass
-        except ValueError as e:
-            self.log.error("Erro de validação: %s", e, extra={'method':'parse'})
-        except Exception as e:
-            self.log.error("[IPC] Erro ao executar comando '%s': %s", command, e,    extra={'method':'parse'})
-            self.log.debug("[IPC] Dados recebidos: %s", data, extra={'method':'parse'})
+            except Empty:
+                pass
+            except ValueError as e:
+                self.log.error("Erro de validação: %s", e, extra={'method':'parse'})
+            except Exception as e:
+                self.log.error("[IPC] Erro ao executar comando '%s': %s", command, e,    extra={'method':'parse'})
+                self.log.debug("[IPC] Dados recebidos: %s", data, extra={'method':'parse'})
+
+            time.sleep(0.01)
 
     def handler_update_variable(self, core, payload):
         control_name = payload.get("control_name")

@@ -1,12 +1,10 @@
-from queue import Queue
-import random
 import threading
 import time
 from typing import Optional
 import colorsys
 
 from .mcu_driver import MCUDriver, MCUType
-from .controller import Controller
+from .controller import ControlWorker, Controller
 from .ipcmanager import IPCManager
 from .logmanager import LogManager
 from controller_framework.gui import MainGUI
@@ -15,15 +13,16 @@ import multiprocessing as mp
 
 
 class AppManager:
-    def __init__(self, mcu_type: MCUType, sample_time = 1000, **kwargs):
+    def __init__(self, mcu_type: MCUType, sample_time = 1, flush_time= 100, **kwargs):
         if not isinstance(mcu_type, MCUType):
             raise ValueError(f"MCU inválida: {mcu_type}. Escolha entre {list(MCUType)}")
         self.__mcu: MCUDriver = MCUDriver.create_driver(mcu_type, **kwargs)
 
-        self.control_instances: dict[Controller] = {}
+        self.control_instances: dict[str, Controller] = {}
         self.running_instance: Optional[Controller] = None
 
         self.sample_time = sample_time # ms
+        self.cache_flush_time = flush_time # ms
 
         self.actuator_vars = {}
         self.sensor_vars = {}
@@ -34,14 +33,12 @@ class AppManager:
         self.__last_read_timestamp = 0
         self.__last_control_timestamp = 0
 
-        self.reading_buffer_semaphore = threading.Semaphore()
-
-        self.control_dts = list()
-        self.read_dts = list()
-
         self.dt = 0
 
         self.setpoints = []
+        self.actuator_cache =  [[]]
+        self.sensor_cache = [[]]
+        self.timestamp_cache = []
 
         self.reading_thread = None
         self.reading_stop_event = threading.Event()
@@ -50,8 +47,6 @@ class AppManager:
         self.command_stop_event = threading.Event()
 
         self.gui = None
-
-        self.reading_buffer = Queue()
 
         self.queue_to_gui = mp.Queue()
         self.queue_from_gui = mp.Queue()
@@ -66,12 +61,10 @@ class AppManager:
     def __getstate__(self):
         state = self.__dict__.copy()
 
-        del state['reading_buffer_semaphore']
         del state['reading_stop_event']
         del state['command_stop_event']
         del state['reading_thread']
         del state['command_thread']
-        del state['reading_buffer']
         del state['ipcmanager']
         del state['_AppManager__mcu']
 
@@ -85,12 +78,10 @@ class AppManager:
     def __setstate__(self, state):
         self.__dict__.update(state)
         
-        self.reading_buffer_semaphore = threading.Semaphore()
         self.reading_stop_event = threading.Event()
         self.command_stop_event = threading.Event()
         self.reading_thread = None
         self.command_thread = None
-        self.reading_buffer = Queue()
         self.ipcmanager = IPCManager(self, self.queue_to_gui, self.queue_from_gui)
 
         mcu_config = state.pop('mcu_config')
@@ -105,17 +96,19 @@ class AppManager:
         target_dt_s = self.sample_time / 1000.0
         next_read_time = now + target_dt_s
 
+        self.actuator_cache = [[] for _ in range(self.num_actuators)]
+        self.sensor_cache = [[] for _ in range(self.num_sensors)]
+
         while not self.reading_stop_event.is_set():
             elapsed = 0
             control_elapsed = 0
             read_elapsed = 0
             feedback_elapsed = 0
-
+            
             now = time.perf_counter()
             
             dt_s = now - self.__last_read_timestamp if self.__last_read_timestamp != 0 else target_dt_s
             dt_ms = dt_s * 1000.0
-            self.read_dts.append(dt_s)
 
             read_start = time.perf_counter()
             try:
@@ -126,8 +119,14 @@ class AppManager:
                 self.update_actuator_vars(actuator_values)
                 self.update_sensors_vars(sensor_values)
 
+                self.timestamp_cache.append(now)
+                for i, val in enumerate(sensor_values):
+                    self.sensor_cache[i].append(val)
+                for i, val in enumerate(actuator_values):
+                    self.actuator_cache[i].append(val)
             except Exception as e:
                 self.log.error("Erro ao ler dados dos sensores: %s", e, extra={'method':'read'})
+
             read_elapsed = (time.perf_counter() - read_start) * 1e3
 
             if self.running_instance is not None:
@@ -158,6 +157,8 @@ class AppManager:
                 next_read_time = time.perf_counter()
 
             next_read_time += target_dt_s
+        
+        self.log.info('stopped', extra={'method':'read'})
 
     def __feedback(self):
         self.__mcu.send(*self.running_instance.actuator_values)
@@ -167,33 +168,18 @@ class AppManager:
         dt = now - self.__last_control_timestamp if self.__last_control_timestamp != 0 else 0
         self.dt = dt * 1e3
 
-        self.running_instance.set_dt(dt)
         self.running_instance.actuator_values = self.get_actuator_values()
         self.running_instance.sensor_values = self.get_sensor_values()
 
-        control_done = threading.Event()
-        control_result = [self.running_instance.actuator_values]
+        if not hasattr(self, '_control_worker'):
+            self._control_worker = ControlWorker(self.running_instance)
 
-        def run_control():
-            try:
-                result = self.running_instance.control()
-                control_result[0] = result
-            finally:
-                control_done.set()
+        result = self._control_worker.run(dt, timeout=(self.sample_time / 1000.0)*0.5)
+        if result is None:
+            self.log.warning('Controle demorou demais, usando valor anterior', extra={'method':'control'})
+        else:
+            self.running_instance.actuator_values = result
 
-        thread = threading.Thread(target=run_control, daemon=True)
-        thread.start()
-
-        start_time = time.perf_counter()
-        while thread.is_alive():
-            elapsed = time.perf_counter() - start_time
-            if elapsed >= (self.sample_time / 1000.0) * 0.9:
-                self.log.warning('Controle demorou demais, usando valor anterior', extra={'method':'control'})
-                break
-            time.sleep(0.01)
-
-        if control_done.is_set():
-            self.running_instance.actuator_values = control_result[0]
         self.__last_control_timestamp = time.perf_counter()
 
     def __connect(self):
@@ -206,23 +192,18 @@ class AppManager:
         self.reading_thread = threading.Thread(target=self.__read_values, daemon=True)
         self.reading_thread.start()
 
-        time.sleep(1)
+        time.sleep(0.1)
         self.ipcmanager.init()
-
-        # self.command_thread = threading.Thread(target=self.__read_command, daemon=True)
-        # self.command_thread.start()
 
         self.gui_process = mp.Process(target=MainGUI.start_gui, args=(self,))
         self.gui_process.start()
+
         self.gui_process.join()
 
         self.reading_stop_event.set()
         self.reading_thread.join()
 
         self.ipcmanager.stop()
-
-        # self.command_stop_event.set()
-        # self.command_thread.join()
 
     def start_controller(self, label):
         if label in self.control_instances:
