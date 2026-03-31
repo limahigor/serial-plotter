@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import inspect
 import json
+import os
 import queue
 import sys
 import threading
@@ -21,8 +22,9 @@ JsonObject: TypeAlias = Dict[str, Any]
 SensorPayload: TypeAlias = Dict[str, float]
 ActuatorPayload: TypeAlias = Dict[str, float]
 ControllerOutputPayload: TypeAlias = Dict[str, float]
-PROTOCOL_STDOUT = sys.stdout
 
+PROTOCOL_STDOUT: Optional[int] = None
+PROTOCOL_STDOUT_LOCK = threading.Lock()
 DRIVER_REQUIRED_METHODS = ("connect", "stop", "read")
 DRIVER_WRITE_METHOD = "write"
 CONTROLLER_REQUIRED_METHODS = ("compute",)
@@ -653,12 +655,101 @@ class PlantRuntimeEngine:
             )
 
 
+def _require_stream_fd(stream: Any, name: str) -> int:
+    if stream is None or not hasattr(stream, "fileno"):
+        raise RuntimeError(f"{name} não expõe um descritor de arquivo")
+    try:
+        return int(stream.fileno())
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Falha ao obter descritor de arquivo de {name}: {exc}") from exc
+
+
+def _sync_windows_stdout_handle_to_stderr() -> None:
+    if os.name != "nt":
+        return
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        invalid_handle = ctypes.c_void_p(-1).value
+        stdout_handle_id = -11
+        stderr_handle_id = -12
+
+        stderr_handle = kernel32.GetStdHandle(stderr_handle_id)
+        if stderr_handle in (0, invalid_handle):
+            raise ctypes.WinError()
+
+        if not kernel32.SetStdHandle(stdout_handle_id, stderr_handle):
+            raise ctypes.WinError()
+    except Exception as exc:  # noqa: BLE001
+        log_error(f"Aviso: não foi possível sincronizar stdout do Windows com stderr: {exc}")
+
+
+def bootstrap_protocol_stdout() -> None:
+    global PROTOCOL_STDOUT
+
+    if PROTOCOL_STDOUT is not None:
+        return
+
+    stdout_stream = sys.__stdout__
+    stderr_stream = sys.__stderr__
+    stdout_fd = _require_stream_fd(stdout_stream, "stdout")
+    stderr_fd = _require_stream_fd(stderr_stream, "stderr")
+
+    stdout_stream.flush()
+    stderr_stream.flush()
+
+    try:
+        protocol_stdout_fd = os.dup(stdout_fd)
+    except OSError as exc:
+        raise RuntimeError(f"Falha ao duplicar stdout do protocolo: {exc}") from exc
+
+    try:
+        try:
+            os.set_inheritable(protocol_stdout_fd, False)
+        except OSError:
+            pass
+
+        PROTOCOL_STDOUT = protocol_stdout_fd
+        os.dup2(stderr_fd, stdout_fd)
+        sys.stdout = sys.stderr
+        _sync_windows_stdout_handle_to_stderr()
+    except Exception:  # noqa: BLE001
+        PROTOCOL_STDOUT = None
+        try:
+            os.close(protocol_stdout_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _resolve_protocol_stdout_fd() -> int:
+    if PROTOCOL_STDOUT is not None:
+        return PROTOCOL_STDOUT
+    return _require_stream_fd(sys.__stdout__, "stdout")
+
+
 def emit(msg_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
     envelope: Dict[str, Any] = {"type": msg_type}
     if payload is not None:
         envelope["payload"] = payload
-    PROTOCOL_STDOUT.write(json.dumps(envelope, ensure_ascii=False) + "\n")
-    PROTOCOL_STDOUT.flush()
+    data = (
+        json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
+    protocol_stdout_fd = _resolve_protocol_stdout_fd()
+    total_written = 0
+
+    with PROTOCOL_STDOUT_LOCK:
+        while total_written < len(data):
+            try:
+                written = os.write(protocol_stdout_fd, data[total_written:])
+            except InterruptedError:
+                continue
+            if written <= 0:
+                raise RuntimeError("Falha ao escrever envelope no stdout do protocolo")
+            total_written += written
 
 
 def log_error(message: str) -> None:
@@ -1291,9 +1382,7 @@ def run() -> int:
     runtime_dir = Path(args.runtime_dir)
     bootstrap_path = Path(args.bootstrap)
 
-    # Keep stdout reserved for the JSON protocol. Any plugin/library print()
-    # should flow to stderr so it never corrupts the IPC stream.
-    sys.stdout = sys.stderr
+    bootstrap_protocol_stdout()
 
     if not bootstrap_path.exists():
         emit("error", {"message": f"bootstrap.json não encontrado em '{bootstrap_path}'"})
