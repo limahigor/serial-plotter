@@ -1,6 +1,6 @@
 [package]
 name = "senamby"
-version = "0.1.0"
+version = "0.1.1"
 description = "Senamby desktop runtime and workspace application"
 authors = ["Senamby"]
 edition = "2021"
