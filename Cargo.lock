@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "senamby"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "senamby-supervisor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "pretty_assertions",
