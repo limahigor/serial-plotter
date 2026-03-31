@@ -346,6 +346,7 @@ class PlantRuntimeEngine:
                 context,
                 f"controlador '{controller_meta.name}'",
             )
+            enrich_legacy_controller_aliases(instance, context)
             loaded.append(
                 LoadedController(
                     metadata=controller_meta,
@@ -1115,6 +1116,61 @@ def instantiate_plugin(plugin_cls: type[Any], context: Any, component_label: str
         raise RuntimeError(
             f"Construtor do {component_label} deve seguir o contrato __init__(self, context)"
         ) from exc
+
+
+def attach_missing_attribute(target: Any, attr_name: str, value: Any) -> None:
+    try:
+        current_value = getattr(target, attr_name)
+    except AttributeError:
+        current_value = None
+    except Exception:  # noqa: BLE001
+        return
+
+    if current_value is not None:
+        return
+
+    try:
+        setattr(target, attr_name, value)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def enrich_legacy_controller_aliases(
+    instance: Any,
+    context: ControllerPluginContext,
+) -> None:
+    attach_missing_attribute(instance, "context", context)
+    attach_missing_attribute(instance, "plant", context.plant)
+
+    try:
+        controller_alias = getattr(instance, "controller")
+    except AttributeError:
+        controller_alias = None
+    except Exception:  # noqa: BLE001
+        return
+
+    if controller_alias is None:
+        attach_missing_attribute(instance, "controller", context.controller)
+        return
+
+    if controller_alias is context.controller:
+        return
+
+    # Some workspace controllers keep an internal `self.controller` object and
+    # still expect runtime metadata such as output_variable_ids to be available there.
+    for attr_name in (
+        "id",
+        "name",
+        "controller_type",
+        "input_variable_ids",
+        "output_variable_ids",
+        "params",
+    ):
+        attach_missing_attribute(
+            controller_alias,
+            attr_name,
+            copy.deepcopy(getattr(context.controller, attr_name)),
+        )
 
 
 def coerce_required_bool(method_name: str, result: Any) -> bool:
