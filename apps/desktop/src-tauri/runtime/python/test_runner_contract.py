@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -23,6 +26,40 @@ def load_runner_module() -> ModuleType:
 
 
 runner = load_runner_module()
+
+
+def run_runner_subprocess(snippet: str) -> subprocess.CompletedProcess[str]:
+    runner_path = Path(__file__).with_name("runner.py")
+    script = "\n".join(
+        [
+            "import importlib.util",
+            "import sys",
+            "from pathlib import Path",
+            "",
+            f"runner_path = Path({str(runner_path)!r})",
+            'spec = importlib.util.spec_from_file_location("senamby_runtime_runner_subprocess", runner_path)',
+            "if spec is None or spec.loader is None:",
+            '    raise RuntimeError("Falha ao carregar runner.py no subprocesso")',
+            "",
+            "runner = importlib.util.module_from_spec(spec)",
+            "sys.modules[spec.name] = runner",
+            "spec.loader.exec_module(runner)",
+            "",
+            textwrap.dedent(snippet).strip(),
+            "",
+        ]
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+
+def parse_protocol_lines(raw_stdout: str) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in raw_stdout.splitlines() if line.strip()]
 
 
 class RunnerContractTests(unittest.TestCase):
@@ -340,6 +377,90 @@ class RunnerContractTests(unittest.TestCase):
             self.assertAlmostEqual(telemetry_payloads[0]["uptime_s"], 0.0, places=6)
             self.assertAlmostEqual(telemetry_payloads[1]["uptime_s"], 1.0, places=6)
             self.assertAlmostEqual(telemetry_payloads[2]["uptime_s"], 2.0, places=6)
+
+
+class RunnerProtocolStreamTests(unittest.TestCase):
+    def test_emit_keeps_json_on_stdout_after_bootstrap(self) -> None:
+        completed = run_runner_subprocess(
+            """
+            runner.bootstrap_protocol_stdout()
+            runner.emit("ready", {"ok": True})
+            """
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(
+            parse_protocol_lines(completed.stdout),
+            [{"type": "ready", "payload": {"ok": True}}],
+        )
+        self.assertEqual(completed.stderr.strip(), "")
+
+    def test_python_print_is_redirected_to_stderr(self) -> None:
+        completed = run_runner_subprocess(
+            """
+            runner.bootstrap_protocol_stdout()
+            print("python-log")
+            runner.emit("ready", {"ok": True})
+            """
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(
+            parse_protocol_lines(completed.stdout),
+            [{"type": "ready", "payload": {"ok": True}}],
+        )
+        self.assertIn("python-log", completed.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "Teste de libc disponível apenas em POSIX")
+    def test_libc_printf_is_redirected_to_stderr(self) -> None:
+        completed = run_runner_subprocess(
+            """
+            import ctypes
+
+            runner.bootstrap_protocol_stdout()
+            libc = ctypes.CDLL(None)
+            libc.printf.argtypes = [ctypes.c_char_p]
+            libc.printf.restype = ctypes.c_int
+            libc.fflush.argtypes = [ctypes.c_void_p]
+            libc.fflush.restype = ctypes.c_int
+            libc.printf(b"native-log\\\\n")
+            libc.fflush(None)
+            runner.emit("ready", {"ok": True})
+            """
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(
+            parse_protocol_lines(completed.stdout),
+            [{"type": "ready", "payload": {"ok": True}}],
+        )
+        self.assertIn("native-log", completed.stderr)
+
+    def test_emit_stays_atomic_across_threads(self) -> None:
+        completed = run_runner_subprocess(
+            """
+            import threading
+
+            runner.bootstrap_protocol_stdout()
+
+            def worker(worker_id: int) -> None:
+                for sequence in range(200):
+                    runner.emit("telemetry", {"worker": worker_id, "sequence": sequence})
+
+            threads = [threading.Thread(target=worker, args=(worker_id,)) for worker_id in range(6)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            """
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        lines = parse_protocol_lines(completed.stdout)
+
+        self.assertEqual(len(lines), 1200)
+        self.assertTrue(all(line["type"] == "telemetry" for line in lines))
+        self.assertEqual(completed.stderr.strip(), "")
 
 
 if __name__ == "__main__":
