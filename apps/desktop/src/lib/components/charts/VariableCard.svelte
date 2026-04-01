@@ -107,7 +107,7 @@
   );
 
   const hasActuatorChart = $derived(mvSeries.length > 0);
-  const showStats = $derived(layoutMode === 'regular');
+  const showStats = $derived(layoutMode !== 'collapsed');
   const showLegendNow = $derived(showLegend && layoutMode !== 'tight' && layoutMode !== 'collapsed');
   const isCollapsedActuator = $derived(hasActuatorChart && layoutMode === 'collapsed');
   const showActuatorChart = $derived(hasActuatorChart && (!isCollapsedActuator || actuatorExpanded));
@@ -257,8 +257,8 @@
   class={`variable-card variable-card--${layoutMode} flex h-full min-h-0 flex-col rounded-xl border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-[#0c0c0e]`}
 >
   <div class="variable-card__header shrink-0 border-b border-slate-200 bg-slate-50 px-3 py-2 dark:border-white/5 dark:bg-zinc-900/50">
-    <div class="flex items-center justify-between gap-2">
-    <div class="flex min-w-0 items-center gap-2 sm:gap-3">
+    <div class="flex flex-wrap items-start justify-between gap-2">
+    <div class="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
       <h3 class="truncate text-sm font-bold text-slate-700 dark:text-zinc-300">
         {title}
         {#if unit}
@@ -266,7 +266,7 @@
         {/if}
       </h3>
       {#if showStats}
-        <div class="variable-card__stats flex items-center gap-2 text-[10px] font-medium">
+        <div class="variable-card__stats flex flex-wrap items-center gap-1.5 text-[10px] font-medium">
           <div class="flex shrink-0 items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-white/5">
             <span class="text-slate-400 dark:text-zinc-500">Erro:</span>
             <span class={errorClass}>
