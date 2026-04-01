@@ -30,6 +30,7 @@
 
   interface SensorEntry {
     variable: PlantVariable;
+    sensorIndex: number;
     originalIndex: number;
     pvKey: string;
     spKey: string;
@@ -75,8 +76,10 @@
 
       const keys = getVariableKeys(index);
       const actuators: LinkedActuatorEntry[] = [];
+      const sensorIndex = entries.length;
       entries.push({
         variable,
+        sensorIndex,
         originalIndex: index,
         pvKey: keys.pv,
         spKey: keys.sp,
@@ -137,9 +140,12 @@
   class:variable-grid-container--single={viewMode === 'single'}
   class:variable-grid-container--grid={viewMode !== 'single'}
 >
-  {#each visibleSensors as sensorEntry, displayIdx (sensorEntry.variable.id)}
+  {#each visibleSensors as sensorEntry (sensorEntry.variable.id)}
     {@const cardConfigs = chartConfigsByVariableIndex[sensorEntry.originalIndex]}
-    <div class={viewMode === 'single' ? 'single-sensor-shell w-full' : 'sensor-card-shell'} data-sensor-index={displayIdx}>
+    <div
+      class={viewMode === 'single' ? 'single-sensor-shell w-full' : 'sensor-card-shell'}
+      data-sensor-index={sensorEntry.sensorIndex}
+    >
       <VariableCard
         title={sensorEntry.variable.name}
         unit={sensorEntry.variable.unit}
@@ -151,7 +157,7 @@
         pvConfig={cardConfigs?.pvConfig ?? FALLBACK_PV_CONFIG}
         mvConfig={cardConfigs?.mvConfig ?? FALLBACK_MV_CONFIG}
         {theme}
-        colors={getColorSet(displayIdx)}
+        colors={getColorSet(sensorEntry.sensorIndex)}
         {lineStyles}
         stats={variableStats[sensorEntry.originalIndex]}
         onRangeChange={onRangeChange
