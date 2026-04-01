@@ -6,8 +6,8 @@ use crate::core::models::plant::{
     SavePlantControllerConfigRequest, SavePlantSetpointRequest, UpdatePlantRequest,
 };
 use crate::core::services::plant::PlantService;
-use crate::core::services::plant_import::{
-    ImportPlantFileResponse, OpenPlantFileResponse, PlantImportFileRequest, PlantImportService,
+use crate::core::services::plant_open::{
+    OpenPlantFilePayload, OpenPlantFileResponse, PlantOpenService,
 };
 use crate::core::services::runtime::{DriverRuntimeService, PlantRuntimeManager};
 use crate::state::AppState;
@@ -15,10 +15,13 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 #[derive(Debug, Deserialize)]
-pub struct ImportFileRequest {
-    #[serde(rename = "fileName")]
+pub struct OpenPlantFileRequest {
+    #[serde(rename = "fileName", default)]
     pub file_name: String,
+    #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,11 +30,12 @@ pub struct SaveExportFileRequest {
     pub content: String,
 }
 
-impl From<ImportFileRequest> for PlantImportFileRequest {
-    fn from(value: ImportFileRequest) -> Self {
+impl From<OpenPlantFileRequest> for OpenPlantFilePayload {
+    fn from(value: OpenPlantFileRequest) -> Self {
         Self {
             file_name: value.file_name,
             content: value.content,
+            path: value.path,
         }
     }
 }
@@ -190,17 +194,11 @@ pub fn save_setpoint(
 }
 
 #[tauri::command]
-pub fn open_plant_file(request: ImportFileRequest) -> Result<OpenPlantFileResponse, ErrorDto> {
-    PlantImportService::open_file(request.into()).map_err(ErrorDto::from)
-}
-
-#[tauri::command]
-pub fn import_plant_file(
+pub fn open_plant_file(
     state: State<'_, AppState>,
-    request: ImportFileRequest,
-) -> Result<ImportPlantFileResponse, ErrorDto> {
-    PlantImportService::import_file(state.plants(), state.plugins(), request.into())
-        .map_err(ErrorDto::from)
+    request: OpenPlantFileRequest,
+) -> Result<OpenPlantFileResponse, ErrorDto> {
+    PlantOpenService::open_file(state.plants(), request.into()).map_err(ErrorDto::from)
 }
 
 #[tauri::command]

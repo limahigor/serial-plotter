@@ -117,8 +117,8 @@ export interface CreatePlantResponse {
 }
 
 export interface OpenPlantRequest {
-  filePath: string;
-  file?: File;
+  path: string;
+  fileName?: string;
 }
 
 export interface OpenPlantResponse {
@@ -132,42 +132,7 @@ export interface OpenPlantResponse {
   error?: string;
 }
 
-export interface OpenPlantFileCommandRequest {
-  fileName: string;
-  content: string;
-}
-
 export interface OpenPlantFileCommandResponse {
-  plant: {
-    id: string;
-    name: string;
-    sample_time_ms: number;
-    connected: boolean;
-    paused: boolean;
-    variables: CreatePlantVariableDto[];
-    stats: PlantStatsDto;
-    driver?: {
-      plugin_id: string;
-      plugin_name: string;
-      config: Record<string, SchemaFieldValue>;
-    } | null;
-  };
-  data: PlantDataPoint[];
-  stats: PlantStats;
-  variable_stats: Array<{
-    error_avg?: number;
-    errorAvg?: number;
-    stability?: number;
-    ripple?: number;
-  }>;
-  series_catalog: {
-    plant_id?: string;
-    plantId?: string;
-    series: PlantSeriesCatalog['series'];
-  };
-}
-
-export interface ImportPlantFileCommandResponse {
   plant: PlantDto;
   data: PlantDataPoint[];
   stats: PlantStats;
@@ -293,10 +258,6 @@ export interface SavePlantSetpointRequest {
   plantId: string;
   variableId: string;
   setpoint: number;
-}
-
-export interface ListPlantsResponse {
-  plants: import('$lib/types/plant').Plant[];
 }
 
 export type { ControllerParam };

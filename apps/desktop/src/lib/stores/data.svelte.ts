@@ -3,20 +3,26 @@ import { createDefaultVariable } from '$lib/types/plant';
 import { normalizeControllerParamValue, type Controller, type ControllerParam } from '$lib/types/controller';
 import type { TabKey } from '$lib/types/ui';
 import type { AppState } from '$lib/types/app';
+import {
+  movePlantTab,
+  openPlantTabs,
+  removePlantTabs,
+  resolveActivePlantId,
+} from '$lib/services/plant/tabState.js';
 
 class AppStore {
   state = $state<AppState>({
     theme: 'dark',
     activeModule: 'plotter',
-    activePlantId: null,
     sidebarCollapsed: true,
     showGlobalSettings: false,
     showControllerPanel: false,
-    plants: []
   });
+  plotterPlants = $state<Plant[]>([]);
+  activePlotterPlantId = $state<string | null>(null);
 
   private findPlant(plantId: string): Plant | undefined {
-    return this.state.plants.find((plant) => plant.id === plantId);
+    return this.plotterPlants.find((plant) => plant.id === plantId);
   }
 
   private withPlant<T>(plantId: string, updater: (plant: Plant) => T): T | undefined {
@@ -32,6 +38,15 @@ class AppStore {
     return plant.controllers.find((controller) => controller.id === controllerId);
   }
 
+  private commitPlantTabs(nextPlants: Plant[], preferredActivePlantId: string | null) {
+    this.plotterPlants = nextPlants;
+    this.activePlotterPlantId = resolveActivePlantId(
+      nextPlants,
+      this.activePlotterPlantId,
+      preferredActivePlantId,
+    );
+  }
+
   setTheme(theme: 'dark' | 'light') {
     this.state.theme = theme;
   }
@@ -45,7 +60,7 @@ class AppStore {
   }
 
   setActivePlantId(id: string) {
-    this.state.activePlantId = id;
+    this.activePlotterPlantId = id;
   }
 
   setSidebarCollapsed(collapsed: boolean) {
@@ -64,53 +79,28 @@ class AppStore {
     this.state.showControllerPanel = show;
   }
 
-  setPlants(plants: Plant[]) {
-    this.state.plants = plants;
-    if (!plants.some((plant) => plant.id === this.state.activePlantId)) {
-      this.state.activePlantId = plants[0]?.id ?? null;
-    }
-  }
-
-  addPlant(plant: Plant) {
-    this.state.plants = [plant, ...this.state.plants.filter((entry) => entry.id !== plant.id)];
-    if (!this.state.activePlantId) {
-      this.state.activePlantId = plant.id;
-    }
+  openPlant(plant: Plant) {
+    const nextPlants = openPlantTabs(this.plotterPlants, plant);
+    this.commitPlantTabs(nextPlants, plant.id);
   }
 
   upsertPlant(plant: Plant) {
-    const index = this.state.plants.findIndex((entry) => entry.id === plant.id);
-    if (index >= 0) {
-      this.state.plants[index] = plant;
-    } else {
-      this.state.plants.unshift(plant);
-    }
+    const nextPlants = openPlantTabs(this.plotterPlants, plant);
+    this.commitPlantTabs(nextPlants, this.activePlotterPlantId ?? plant.id);
   }
 
   removePlant(plantId: string) {
-    const idx = this.state.plants.findIndex(p => p.id === plantId);
-    if (idx > -1) {
-      this.state.plants.splice(idx, 1);
-      if (this.state.activePlantId === plantId) {
-        this.state.activePlantId = this.state.plants[0]?.id ?? null;
-      }
-    }
+    const preferredActivePlantId = this.activePlotterPlantId === plantId
+      ? null
+      : this.activePlotterPlantId;
+    const nextPlants = removePlantTabs(this.plotterPlants, plantId);
+    this.plotterPlants = nextPlants;
+    this.activePlotterPlantId = resolveActivePlantId(nextPlants, preferredActivePlantId, null);
   }
 
-  updatePlant(plantId: string, updates: Partial<Plant>) {
-    this.withPlant(plantId, (plant) => Object.assign(plant, updates));
-  }
-
-  toggleConnect(plantId: string) {
-    this.withPlant(plantId, (plant) => {
-      plant.connected = !plant.connected;
-    });
-  }
-
-  togglePause(plantId: string) {
-    this.withPlant(plantId, (plant) => {
-      plant.paused = !plant.paused;
-    });
+  reorderPlants(sourcePlantId: string, targetPlantId: string, position: 'before' | 'after') {
+    const nextPlants = movePlantTab(this.plotterPlants, sourcePlantId, targetPlantId, position);
+    this.commitPlantTabs(nextPlants, this.activePlotterPlantId);
   }
 
   addController(plantId: string, controller: Omit<Controller, 'id'>) {

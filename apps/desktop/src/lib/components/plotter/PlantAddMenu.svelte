@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { FolderOpen, FilePlus } from 'lucide-svelte';
 
   interface Props {
@@ -19,9 +20,10 @@
     onCreateNew,
   }: Props = $props();
 
-  function handleOpenFile() {
-    onOpenFile();
+  async function handleOpenFile() {
     onClose();
+    await tick();
+    await onOpenFile();
   }
 
   function handleCreateNew() {
@@ -40,6 +42,7 @@
       onclick={(e) => e.stopPropagation()}
     >
       <button
+        type="button"
         onclick={handleOpenFile}
         class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-left"
       >
@@ -53,6 +56,7 @@
       <div class="mx-3 my-1 border-t border-slate-100 dark:border-white/5"></div>
       
       <button
+        type="button"
         onclick={handleCreateNew}
         class="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-left"
       >

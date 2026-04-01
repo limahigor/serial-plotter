@@ -15,6 +15,7 @@
     activeId,
     onSelect,
     onAdd,
+    onReorder,
     onRemove,
     addLabel = 'Adicionar',
     addButtonRef = $bindable(),
@@ -23,6 +24,7 @@
     activeId: string;
     onSelect: (id: string) => void;
     onAdd: () => void;
+    onReorder?: (sourceId: string, targetId: string, position: 'before' | 'after') => void;
     onRemove?: (id: string) => void;
     addLabel?: string;
     addButtonRef?: HTMLButtonElement;
@@ -34,6 +36,10 @@
   let inlineAddButtonRef = $state<HTMLButtonElement | undefined>(undefined);
   let fixedAddButtonRef = $state<HTMLButtonElement | undefined>(undefined);
   let useFixedAddButton = $state(false);
+  let draggedTabId = $state<string | null>(null);
+  let dropTargetId = $state<string | null>(null);
+  let dropPosition = $state<'before' | 'after'>('before');
+  let dragPreviewElement = $state<HTMLDivElement | null>(null);
 
   function syncBoundAddButtonRef(): void {
     addButtonRef = useFixedAddButton ? fixedAddButtonRef : inlineAddButtonRef;
@@ -82,14 +88,110 @@
     tabsItemsRef;
     syncBoundAddButtonRef();
   });
+
+  function resetDragState(): void {
+    draggedTabId = null;
+    dropTargetId = null;
+    dropPosition = 'before';
+    dragPreviewElement?.remove();
+    dragPreviewElement = null;
+  }
+
+  function isReorderEnabled(item: WorkspaceTabItem): boolean {
+    return !item.placeholder && typeof onReorder === 'function';
+  }
+
+  function resolveDropPosition(event: DragEvent, itemIndex: number): 'before' | 'after' {
+    const target = event.currentTarget as HTMLElement | null;
+    if (!target) return 'before';
+    const rect = target.getBoundingClientRect();
+    const threshold = itemIndex === 0 ? rect.width * 0.75 : rect.width / 2;
+    return event.clientX >= rect.left + threshold ? 'after' : 'before';
+  }
+
+  function createDragPreview(label: string): HTMLDivElement | null {
+    if (typeof document === 'undefined') return null;
+
+    const preview = document.createElement('div');
+    preview.textContent = label;
+    preview.style.position = 'fixed';
+    preview.style.left = '-9999px';
+    preview.style.top = '-9999px';
+    preview.style.pointerEvents = 'none';
+    preview.style.maxWidth = '160px';
+    preview.style.padding = '6px 10px';
+    preview.style.borderRadius = '12px';
+    preview.style.border = '1px solid rgba(148, 163, 184, 0.35)';
+    preview.style.background = 'rgba(15, 23, 42, 0.92)';
+    preview.style.color = '#f8fafc';
+    preview.style.font = '600 12px system-ui, sans-serif';
+    preview.style.whiteSpace = 'nowrap';
+    preview.style.overflow = 'hidden';
+    preview.style.textOverflow = 'ellipsis';
+    preview.style.boxShadow = '0 8px 24px rgba(15, 23, 42, 0.22)';
+    document.body.appendChild(preview);
+    return preview;
+  }
+
+  function handleDragStart(event: DragEvent, item: WorkspaceTabItem): void {
+    if (!isReorderEnabled(item)) return;
+
+    draggedTabId = item.id;
+    dragPreviewElement = createDragPreview(item.name);
+    event.dataTransfer?.setData('text/plain', item.id);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      if (dragPreviewElement) {
+        event.dataTransfer.setDragImage(dragPreviewElement, 16, 16);
+      }
+    }
+  }
+
+  function handleDragOver(event: DragEvent, item: WorkspaceTabItem, itemIndex: number): void {
+    if (!isReorderEnabled(item) || !draggedTabId || draggedTabId === item.id) return;
+
+    event.preventDefault();
+    dropTargetId = item.id;
+    dropPosition = resolveDropPosition(event, itemIndex);
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+  }
+
+  function handleDrop(event: DragEvent, item: WorkspaceTabItem, itemIndex: number): void {
+    if (!isReorderEnabled(item) || !draggedTabId || draggedTabId === item.id) {
+      resetDragState();
+      return;
+    }
+
+    event.preventDefault();
+    const position = dropTargetId === item.id ? dropPosition : resolveDropPosition(event, itemIndex);
+    onReorder?.(draggedTabId, item.id, position);
+    resetDragState();
+  }
 </script>
 
 <header class="flex h-11 items-end border-b border-slate-200 bg-white px-2 pt-1 select-none print:hidden dark:border-white/5 dark:bg-[#0c0c0e]">
   <div bind:this={tabsViewportRef} class="flex min-w-0 flex-1 overflow-x-auto">
     <div bind:this={tabsTrackRef} class="flex min-w-max items-end gap-1">
       <div bind:this={tabsItemsRef} class="flex min-w-max items-end gap-1">
-        {#each items as item (item.id)}
-          <div class="group relative flex h-9 min-w-[88px] max-w-[180px] items-center sm:min-w-[112px]">
+        {#each items as item, itemIndex (item.id)}
+          <div
+            class="group relative flex h-9 min-w-[88px] max-w-[180px] items-center sm:min-w-[112px]"
+            role="presentation"
+            draggable={isReorderEnabled(item)}
+            ondragstart={(event) => handleDragStart(event, item)}
+            ondragover={(event) => handleDragOver(event, item, itemIndex)}
+            ondrop={(event) => handleDrop(event, item, itemIndex)}
+            ondragend={resetDragState}
+          >
+            {#if dropTargetId === item.id}
+              <span
+                class={`pointer-events-none absolute inset-y-1 z-10 w-0.5 rounded-full bg-blue-500 ${
+                  dropPosition === 'after' ? 'right-0' : 'left-0'
+                }`}
+              ></span>
+            {/if}
             <button
               onclick={() => !item.placeholder && onSelect(item.id)}
               class={`flex h-full w-full items-center gap-2 rounded-t-xl border-x border-t px-2.5 pr-7 text-xs font-semibold transition-all ${

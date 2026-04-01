@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -209,7 +210,9 @@ class LoadedController:
 class ControllerReloadResult:
     version: int
     controllers: List[ControllerMetadata]
-    loaded: Optional[List[LoadedController]] = None
+    next_loaded: Optional[List[LoadedController]] = None
+    fresh_loaded: List[LoadedController] = field(default_factory=list)
+    stale_loaded: List[LoadedController] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -310,8 +313,8 @@ class PlantRuntimeEngine:
             except queue.Empty:
                 break
 
-            if result.loaded is not None:
-                self._stop_loaded_controllers(result.loaded)
+            if result.fresh_loaded:
+                self._stop_loaded_controllers(result.fresh_loaded)
 
     def _ensure_driver_write_support(
         self,
@@ -324,45 +327,69 @@ class PlantRuntimeEngine:
                 "Driver precisa implementar write(outputs) quando houver controladores ativos"
             )
 
+    def _load_controller(self, controller_meta: ControllerMetadata) -> LoadedController:
+        controller_cls = load_plugin_class(
+            Path(controller_meta.plugin_dir),
+            controller_meta.source_file,
+            controller_meta.class_name,
+            CONTROLLER_REQUIRED_METHODS,
+            f"controlador '{controller_meta.name}'",
+        )
+        context = build_controller_plugin_context(
+            controller_meta,
+            self.bootstrap.plant,
+        )
+        instance = instantiate_plugin(
+            controller_cls,
+            context,
+            f"controlador '{controller_meta.name}'",
+        )
+        enrich_legacy_controller_aliases(instance, context)
+        loaded = LoadedController(
+            metadata=controller_meta,
+            public_metadata=build_public_controller_metadata(controller_meta).serialize(),
+            instance=cast(ControllerProtocol, instance),
+        )
+        maybe_call_optional_connect(loaded.instance, controller_meta.name)
+        return loaded
+
     def _load_controllers(
         self,
         controllers: List[ControllerMetadata],
     ) -> List[LoadedController]:
-        loaded: List[LoadedController] = []
-        for controller_meta in controllers:
-            controller_cls = load_plugin_class(
-                Path(controller_meta.plugin_dir),
-                controller_meta.source_file,
-                controller_meta.class_name,
-                CONTROLLER_REQUIRED_METHODS,
-                f"controlador '{controller_meta.name}'",
-            )
-            context = build_controller_plugin_context(
-                controller_meta,
-                self.bootstrap.plant,
-            )
-            instance = instantiate_plugin(
-                controller_cls,
-                context,
-                f"controlador '{controller_meta.name}'",
-            )
-            enrich_legacy_controller_aliases(instance, context)
-            loaded.append(
-                LoadedController(
-                    metadata=controller_meta,
-                    public_metadata=build_public_controller_metadata(controller_meta).serialize(),
-                    instance=cast(ControllerProtocol, instance),
-                )
-            )
-            maybe_call_optional_connect(loaded[-1].instance, controller_meta.name)
-        return loaded
+        return [self._load_controller(controller_meta) for controller_meta in controllers]
 
-    def _install_controllers(
+    def _controller_metadata_fingerprint(self, metadata: ControllerMetadata) -> str:
+        serialized = {
+            "id": metadata.id,
+            "plugin_id": metadata.plugin_id,
+            "plugin_name": metadata.plugin_name,
+            "plugin_dir": metadata.plugin_dir,
+            "source_file": metadata.source_file,
+            "class_name": metadata.class_name,
+            "name": metadata.name,
+            "controller_type": metadata.controller_type,
+            "active": metadata.active,
+            "input_variable_ids": list(metadata.input_variable_ids),
+            "output_variable_ids": list(metadata.output_variable_ids),
+            "params": serialize_controller_params(metadata.params),
+        }
+        return json.dumps(serialized, sort_keys=True, ensure_ascii=True)
+
+    def _can_preserve_loaded_controller(
+        self,
+        current: LoadedController,
+        next_metadata: ControllerMetadata,
+    ) -> bool:
+        return self._controller_metadata_fingerprint(
+            current.metadata
+        ) == self._controller_metadata_fingerprint(next_metadata)
+
+    def _apply_loaded_controllers(
         self,
         controllers: List[ControllerMetadata],
         loaded: List[LoadedController],
     ) -> None:
-        self._stop_loaded_controllers(self.controllers)
         self.bootstrap = RuntimeBootstrap(
             driver=self.bootstrap.driver,
             controllers=list(controllers),
@@ -615,38 +642,83 @@ class PlantRuntimeEngine:
                 break
 
             if result.version != self.controller_reload_version:
-                if result.loaded is not None:
-                    self._stop_loaded_controllers(result.loaded)
+                if result.fresh_loaded:
+                    self._stop_loaded_controllers(result.fresh_loaded)
                 continue
 
             if result.error is not None:
                 emit("error", {"message": f"Falha ao atualizar controladores: {result.error}"})
                 continue
 
-            self._install_controllers(result.controllers, result.loaded or [])
+            self._apply_loaded_controllers(result.controllers, result.next_loaded or [])
+            self._stop_loaded_controllers(result.stale_loaded)
 
     def _replace_controllers(self, controllers: List[ControllerMetadata]) -> None:
         self._ensure_driver_write_support(controllers)
         loaded = self._load_controllers(controllers)
-        self._install_controllers(controllers, loaded)
+        stale_loaded = list(self.controllers)
+        self._apply_loaded_controllers(controllers, loaded)
+        self._stop_loaded_controllers(stale_loaded)
 
     def _load_controllers_async(
         self,
         version: int,
         controllers: List[ControllerMetadata],
     ) -> None:
+        fresh_loaded: List[LoadedController] = []
         try:
             self._ensure_driver_write_support(controllers)
-            loaded = self._load_controllers(controllers)
+            current_controllers = list(self.controllers)
+            current_by_id = {
+                controller.metadata.id: controller for controller in current_controllers
+            }
+            preserved_by_id: Dict[str, LoadedController] = {}
+            fresh_by_id: Dict[str, LoadedController] = {}
+
+            for controller_meta in controllers:
+                current = current_by_id.get(controller_meta.id)
+                if current is not None and self._can_preserve_loaded_controller(
+                    current,
+                    controller_meta,
+                ):
+                    preserved_by_id[controller_meta.id] = current
+                    continue
+
+                loaded_controller = self._load_controller(controller_meta)
+                fresh_loaded.append(loaded_controller)
+                fresh_by_id[controller_meta.id] = loaded_controller
+
+            next_loaded: List[LoadedController] = []
+            for controller_meta in controllers:
+                preserved = preserved_by_id.get(controller_meta.id)
+                if preserved is not None:
+                    next_loaded.append(preserved)
+                    continue
+
+                fresh = fresh_by_id.get(controller_meta.id)
+                if fresh is None:
+                    raise RuntimeError(
+                        f"Falha ao preparar controlador '{controller_meta.name}' para hot-reload"
+                    )
+                next_loaded.append(fresh)
+
+            stale_loaded = [
+                controller
+                for controller in current_controllers
+                if controller.metadata.id not in preserved_by_id
+            ]
             self.controller_reload_results.put(
                 ControllerReloadResult(
                     version=version,
                     controllers=list(controllers),
-                    loaded=loaded,
+                    next_loaded=next_loaded,
+                    fresh_loaded=list(fresh_loaded),
+                    stale_loaded=stale_loaded,
                 )
             )
         except Exception as exc:  # noqa: BLE001
             log_exception(exc)
+            self._stop_loaded_controllers(fresh_loaded)
             self.controller_reload_results.put(
                 ControllerReloadResult(
                     version=version,
@@ -1076,15 +1148,22 @@ def load_plugin_class(
     if not source_path.exists():
         raise RuntimeError(f"{source_file} não encontrado em '{source_path}'")
 
+    module_hash = hashlib.sha1(str(source_path.resolve()).encode("utf-8")).hexdigest()[:12]
+    module_name = f"runtime_plugin_{expected_class_name.lower()}_{module_hash}"
     spec = importlib.util.spec_from_file_location(
-        f"runtime_plugin_{expected_class_name.lower()}",
+        module_name,
         str(source_path),
     )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Falha ao criar spec do módulo do {component_label}")
 
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
 
     candidate = getattr(module, expected_class_name, None)
     if candidate is None or not inspect.isclass(candidate):

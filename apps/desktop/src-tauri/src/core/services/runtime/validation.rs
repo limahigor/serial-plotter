@@ -186,6 +186,32 @@ pub(super) fn validate_driver_write_support(
     })
 }
 
+pub(super) fn validate_runtime_driver(
+    python_path: &Path,
+    driver_plugin: &PluginRegistry,
+) -> AppResult<()> {
+    if driver_plugin.runtime != PluginRuntime::Python {
+        return Err(AppError::InvalidArgument(
+            "A runtime atual suporta apenas drivers Python".into(),
+        ));
+    }
+
+    let driver_dir = WorkspaceService::plugin_directory(&driver_plugin.name, PluginType::Driver)?;
+    validate_plugin_workspace_files(&driver_dir, "driver")?;
+
+    let source_path = resolve_plugin_source_path(driver_plugin, PluginType::Driver)?;
+    validate_python_source_file(python_path, &source_path, "driver")?;
+    validate_python_importable_class(
+        python_path,
+        &source_path,
+        &driver_plugin.entry_class,
+        &["connect", "stop", "read"],
+        "driver",
+    )?;
+
+    Ok(())
+}
+
 pub(super) fn validate_runtime_controller(
     python_path: &Path,
     controller_plugin: &PluginRegistry,

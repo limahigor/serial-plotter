@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -228,6 +229,198 @@ class RunnerContractTests(unittest.TestCase):
             runtime=runtime,
         )
 
+    def build_multi_channel_bootstrap(self, root: Path) -> Any:
+        plant_variables = [
+            runner.VariableSpec(
+                id="sensor_1",
+                name="Sensor 1",
+                type="sensor",
+                unit="C",
+                setpoint=42.0,
+                pv_min=0.0,
+                pv_max=100.0,
+                linked_sensor_ids=[],
+            ),
+            runner.VariableSpec(
+                id="sensor_2",
+                name="Sensor 2",
+                type="sensor",
+                unit="C",
+                setpoint=35.0,
+                pv_min=0.0,
+                pv_max=100.0,
+                linked_sensor_ids=[],
+            ),
+            runner.VariableSpec(
+                id="actuator_1",
+                name="Actuator 1",
+                type="actuator",
+                unit="%",
+                setpoint=0.0,
+                pv_min=0.0,
+                pv_max=100.0,
+                linked_sensor_ids=["sensor_1"],
+            ),
+            runner.VariableSpec(
+                id="actuator_2",
+                name="Actuator 2",
+                type="actuator",
+                unit="%",
+                setpoint=0.0,
+                pv_min=0.0,
+                pv_max=100.0,
+                linked_sensor_ids=["sensor_2"],
+            ),
+        ]
+
+        variables_by_id = {variable.id: variable for variable in plant_variables}
+        plant = runner.PlantContext(
+            id="plant_multi",
+            name="Plant Multi",
+            variables=plant_variables,
+            variables_by_id=variables_by_id,
+            sensors=runner.IOGroup(
+                ids=["sensor_1", "sensor_2"],
+                count=2,
+                variables=[variables_by_id["sensor_1"], variables_by_id["sensor_2"]],
+                variables_by_id={
+                    "sensor_1": variables_by_id["sensor_1"],
+                    "sensor_2": variables_by_id["sensor_2"],
+                },
+            ),
+            actuators=runner.IOGroup(
+                ids=["actuator_1", "actuator_2"],
+                count=2,
+                variables=[variables_by_id["actuator_1"], variables_by_id["actuator_2"]],
+                variables_by_id={
+                    "actuator_1": variables_by_id["actuator_1"],
+                    "actuator_2": variables_by_id["actuator_2"],
+                },
+            ),
+            setpoints={
+                "sensor_1": 42.0,
+                "sensor_2": 35.0,
+                "actuator_1": 0.0,
+                "actuator_2": 0.0,
+            },
+        )
+
+        runtime = runner.RuntimeContext(
+            id="rt_multi",
+            timing=runner.RuntimeTiming(
+                owner="runtime",
+                clock="monotonic",
+                strategy="deadline",
+                sample_time_ms=100,
+            ),
+            supervision=runner.RuntimeSupervision(
+                owner="rust",
+                startup_timeout_ms=12000,
+                shutdown_timeout_ms=4000,
+            ),
+            paths=runner.RuntimePaths(
+                runtime_dir=str(root / "runtime"),
+                venv_python_path=str(root / ".venv" / "bin" / "python"),
+                runner_path=str(root / "runtime" / "runner.py"),
+                bootstrap_path=str(root / "runtime" / "bootstrap.json"),
+            ),
+        )
+
+        driver_dir = root / "driver_plugin"
+        driver_dir.mkdir()
+        (driver_dir / "main.py").write_text(
+            textwrap.dedent(
+                """
+                from typing import Any, Dict
+
+                class MultiChannelDriver:
+                    def __init__(self, context: Any) -> None:
+                        self.context = context
+                        self.write_calls = []
+
+                    def connect(self) -> bool:
+                        return True
+
+                    def stop(self) -> bool:
+                        return True
+
+                    def read(self) -> Dict[str, Dict[str, float]]:
+                        return {
+                            "sensors": {"sensor_1": 10.0, "sensor_2": 20.0},
+                            "actuators": {"actuator_1": 0.0, "actuator_2": 0.0},
+                        }
+
+                    def write(self, outputs: Dict[str, float]) -> bool:
+                        self.write_calls.append(dict(outputs))
+                        return True
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        controller_dir = root / "controller_plugin"
+        controller_dir.mkdir()
+        (controller_dir / "main.py").write_text(
+            textwrap.dedent(
+                """
+                from typing import Any, Dict
+
+                class CounterController:
+                    def __init__(self, context: Any) -> None:
+                        self.context = context
+                        self.connect_calls = 0
+                        self.stop_calls = 0
+
+                    def connect(self) -> bool:
+                        self.connect_calls += 1
+                        return True
+
+                    def stop(self) -> bool:
+                        self.stop_calls += 1
+                        return True
+
+                    def compute(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
+                        output_id = self.context.controller.output_variable_ids[0]
+                        sensor_id = self.context.controller.input_variable_ids[0]
+                        return {
+                            output_id: float(snapshot["sensors"].get(sensor_id, 0.0))
+                        }
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        return runner.RuntimeBootstrap(
+            driver=runner.DriverMetadata(
+                plugin_id="driver_plugin_multi",
+                plugin_name="Driver Plugin Multi",
+                plugin_dir=str(driver_dir),
+                source_file="main.py",
+                class_name="MultiChannelDriver",
+                config={},
+            ),
+            controllers=[
+                runner.ControllerMetadata(
+                    id="ctrl_1",
+                    plugin_id="controller_plugin_multi",
+                    plugin_name="Controller Plugin Multi",
+                    plugin_dir=str(controller_dir),
+                    source_file="main.py",
+                    class_name="CounterController",
+                    name="Controller 1",
+                    controller_type="PID",
+                    active=True,
+                    input_variable_ids=["sensor_1"],
+                    output_variable_ids=["actuator_1"],
+                    params={},
+                )
+            ],
+            plant=plant,
+            runtime=runtime,
+        )
+
     def test_driver_context_exposes_only_config_and_plant(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             bootstrap = self.build_bootstrap(Path(tmp_dir))
@@ -314,6 +507,193 @@ class RunnerContractTests(unittest.TestCase):
                         "output_variable_ids",
                         "params",
                     },
+                )
+            finally:
+                engine.stop()
+
+    def test_engine_enriches_legacy_controller_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bootstrap = self.build_bootstrap(Path(tmp_dir))
+            controller_path = Path(bootstrap.controllers[0].plugin_dir) / "main.py"
+            controller_path.write_text(
+                textwrap.dedent(
+                    """
+                    from typing import Any, Dict
+
+                    class InnerLoop:
+                        def __init__(self) -> None:
+                            self.loop_name = "inner-loop"
+
+                    class CompatibilityController:
+                        def __init__(self, context: Any) -> None:
+                            self.context = context
+                            self.controller = InnerLoop()
+
+                        def compute(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
+                            return {self.controller.output_variable_ids[0]: 0.0}
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            bootstrap.controllers[0].class_name = "CompatibilityController"
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            try:
+                engine.start()
+
+                controller_instance = engine.controllers[0].instance
+                self.assertEqual(controller_instance.controller.loop_name, "inner-loop")
+                self.assertEqual(
+                    controller_instance.controller.output_variable_ids,
+                    ["actuator_1"],
+                )
+
+                snapshot = runner.build_controller_snapshot(
+                    cycle_id=1,
+                    cycle_started_at=123.456,
+                    dt_ms=100.0,
+                    plant=bootstrap.plant,
+                    controller_public_metadata=runner.build_public_controller_metadata(
+                        bootstrap.controllers[0]
+                    ).serialize(),
+                    sensors={"sensor_1": 40.0},
+                    actuators={"actuator_1": 10.0},
+                )
+
+                self.assertEqual(
+                    controller_instance.compute(snapshot),
+                    {"actuator_1": 0.0},
+                )
+            finally:
+                engine.stop()
+
+    def test_load_plugin_class_supports_plugins_with_dataclass_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            plugin_dir = Path(tmp_dir)
+            (plugin_dir / "main.py").write_text(
+                textwrap.dedent(
+                    """
+                    from dataclasses import dataclass
+
+                    @dataclass
+                    class HelperState:
+                        value: int = 1
+
+                    class DataclassDriver:
+                        def __init__(self, context):
+                            self.context = context
+                            self.state = HelperState()
+
+                        def connect(self):
+                            return True
+
+                        def stop(self):
+                            return True
+
+                        def read(self):
+                            return {"sensors": {}, "actuators": {}}
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            plugin_cls = runner.load_plugin_class(
+                plugin_dir,
+                "main.py",
+                "DataclassDriver",
+                runner.DRIVER_REQUIRED_METHODS,
+                "driver de teste",
+            )
+            instance = runner.instantiate_plugin(
+                plugin_cls,
+                object(),
+                "driver de teste",
+            )
+
+            self.assertEqual(plugin_cls.__name__, "DataclassDriver")
+            self.assertEqual(instance.state.value, 1)
+
+    def test_update_controllers_preserves_running_instances_that_did_not_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bootstrap = self.build_multi_channel_bootstrap(Path(tmp_dir))
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            try:
+                engine.start()
+
+                first_loaded = engine.controllers[0]
+                first_instance = first_loaded.instance
+                self.assertEqual(first_instance.connect_calls, 1)
+
+                next_controllers = [
+                    first_loaded.metadata,
+                    runner.ControllerMetadata(
+                        id="ctrl_2",
+                        plugin_id="controller_plugin_multi",
+                        plugin_name="Controller Plugin Multi",
+                        plugin_dir=first_loaded.metadata.plugin_dir,
+                        source_file=first_loaded.metadata.source_file,
+                        class_name=first_loaded.metadata.class_name,
+                        name="Controller 2",
+                        controller_type="PID",
+                        active=True,
+                        input_variable_ids=["sensor_2"],
+                        output_variable_ids=["actuator_2"],
+                        params={},
+                    ),
+                ]
+
+                engine.update_controllers(next_controllers)
+
+                for _ in range(50):
+                    time.sleep(0.01)
+                    engine.apply_pending_controller_reload()
+                    if len(engine.controllers) == 2:
+                        break
+
+                self.assertEqual(len(engine.controllers), 2)
+                self.assertIs(engine.controllers[0].instance, first_instance)
+                self.assertEqual(first_instance.connect_calls, 1)
+                self.assertEqual(first_instance.stop_calls, 0)
+                self.assertEqual(engine.controllers[1].instance.connect_calls, 1)
+            finally:
+                engine.stop()
+
+    def test_run_cycle_writes_distinct_outputs_for_distinct_controller_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bootstrap = self.build_multi_channel_bootstrap(Path(tmp_dir))
+            bootstrap = runner.RuntimeBootstrap(
+                driver=bootstrap.driver,
+                controllers=[
+                    bootstrap.controllers[0],
+                    runner.ControllerMetadata(
+                        id="ctrl_2",
+                        plugin_id="controller_plugin_multi",
+                        plugin_name="Controller Plugin Multi",
+                        plugin_dir=bootstrap.controllers[0].plugin_dir,
+                        source_file=bootstrap.controllers[0].source_file,
+                        class_name=bootstrap.controllers[0].class_name,
+                        name="Controller 2",
+                        controller_type="PID",
+                        active=True,
+                        input_variable_ids=["sensor_2"],
+                        output_variable_ids=["actuator_2"],
+                        params={},
+                    ),
+                ],
+                plant=bootstrap.plant,
+                runtime=bootstrap.runtime,
+            )
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            try:
+                engine.start()
+                engine.run_cycle()
+
+                driver_instance = engine.driver_instance
+                self.assertIsNotNone(driver_instance)
+                self.assertEqual(
+                    driver_instance.write_calls[-1],
+                    {"actuator_1": 10.0, "actuator_2": 20.0},
                 )
             finally:
                 engine.stop()

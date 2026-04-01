@@ -1,3 +1,5 @@
+import { open as openNativeDialog } from '@tauri-apps/plugin-dialog';
+
 export interface FileFilter {
   name: string;
   extensions: readonly string[] | string[];
@@ -14,6 +16,35 @@ export interface FileResult {
   name: string;
   path: string;
   extension: string;
+}
+
+export interface FilePathResult {
+  name: string;
+  path: string;
+  extension: string;
+}
+
+function isTauriRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  return '__TAURI_INTERNALS__' in window || '__TAURI__' in window;
+}
+
+function normalizeDialogPath(path: string | string[] | null): string | null {
+  if (typeof path === 'string') return path;
+  if (Array.isArray(path) && path.length > 0) return path[0] ?? null;
+  return null;
+}
+
+function buildPathResult(path: string): FilePathResult {
+  const normalizedPath = path.replace(/\\/g, '/');
+  const name = normalizedPath.split('/').pop() ?? path;
+  const extension = name.split('.').pop()?.toLowerCase() ?? '';
+
+  return {
+    name,
+    path,
+    extension,
+  };
 }
 
 export function openFileDialog(options: OpenFileOptions = {}): Promise<FileResult | null> {
@@ -77,6 +108,32 @@ export function openFileDialog(options: OpenFileOptions = {}): Promise<FileResul
     window.addEventListener('focus', handleFocus);
     input.click();
   });
+}
+
+export async function openFilePathDialog(options: OpenFileOptions = {}): Promise<FilePathResult | null> {
+  if (isTauriRuntime()) {
+    const selected = await openNativeDialog({
+      title: options.title,
+      filters: options.filters?.map((filter) => ({
+        name: filter.name,
+        extensions: [...filter.extensions],
+      })),
+      multiple: options.multiple ?? false,
+      directory: false,
+    });
+
+    const path = normalizeDialogPath(selected);
+    return path ? buildPathResult(path) : null;
+  }
+
+  const result = await openFileDialog(options);
+  if (!result) return null;
+
+  return {
+    name: result.name,
+    path: result.path,
+    extension: result.extension,
+  };
 }
 
 export function readFileAsText(file: File): Promise<string> {

@@ -95,7 +95,10 @@ pub(super) fn ensure_python_env(
 
     let venv_dir = env_dir.join(".venv");
     let venv_python = venv_python_path(&venv_dir);
+    let lock_path = env_dir.join("requirements.lock.txt");
+    let specs = collect_dependency_specs(runtime_plugins);
     let should_recreate_env = !venv_python.exists() || check_python_runtime(&venv_python).is_err();
+    let should_install_deps = should_recreate_env || dependency_lock_needs_update(&lock_path, &specs)?;
 
     if should_recreate_env {
         if venv_dir.exists() {
@@ -112,8 +115,9 @@ pub(super) fn ensure_python_env(
         prepare_python_command(create_venv.arg("-m").arg("venv").arg(&venv_dir));
         run_command(&mut create_venv, "Falha ao criar ambiente Python isolado")?;
         check_python_runtime(&venv_python)?;
+    }
 
-        let specs = collect_dependency_specs(runtime_plugins);
+    if should_install_deps {
         if !specs.is_empty() {
             let mut install_deps = Command::new(&venv_python);
             prepare_python_command(
@@ -128,15 +132,9 @@ pub(super) fn ensure_python_env(
                 &mut install_deps,
                 "Falha ao instalar dependências da runtime da planta",
             )?;
-
-            let lock_path = env_dir.join("requirements.lock.txt");
-            fs::write(&lock_path, specs.join("\n")).map_err(|error| {
-                AppError::IoError(format!(
-                    "Falha ao gravar requirements.lock.txt em '{}': {error}",
-                    lock_path.display()
-                ))
-            })?;
         }
+
+        write_dependency_lock(&lock_path, &specs)?;
     }
 
     let metadata_path = env_dir.join("metadata.json");
@@ -259,6 +257,47 @@ fn collect_dependency_specs(runtime_plugins: &[PluginRegistry]) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn dependency_lock_needs_update(lock_path: &Path, specs: &[String]) -> AppResult<bool> {
+    match fs::read_to_string(lock_path) {
+        Ok(contents) => {
+            let locked_specs = contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            Ok(locked_specs != specs)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(!specs.is_empty()),
+        Err(error) => Err(AppError::IoError(format!(
+            "Falha ao ler requirements.lock.txt em '{}': {error}",
+            lock_path.display()
+        ))),
+    }
+}
+
+fn write_dependency_lock(lock_path: &Path, specs: &[String]) -> AppResult<()> {
+    if specs.is_empty() {
+        match fs::remove_file(lock_path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(AppError::IoError(format!(
+                    "Falha ao remover requirements.lock.txt em '{}': {error}",
+                    lock_path.display()
+                )))
+            }
+        }
+    }
+
+    fs::write(lock_path, specs.join("\n")).map_err(|error| {
+        AppError::IoError(format!(
+            "Falha ao gravar requirements.lock.txt em '{}': {error}",
+            lock_path.display()
+        ))
+    })
 }
 
 pub(super) fn compute_env_hash(runtime_plugins: &[PluginRegistry]) -> String {
@@ -400,5 +439,37 @@ mod tests {
             "stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn dependency_lock_needs_update_when_specs_change() {
+        let test_dir = std::env::temp_dir().join("senamby-runtime-env-lock-tests");
+        let _ = fs::remove_dir_all(&test_dir);
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let lock_path = test_dir.join("requirements.lock.txt");
+        write_dependency_lock(&lock_path, &["pyserial".to_string()]).unwrap();
+
+        assert!(!dependency_lock_needs_update(&lock_path, &["pyserial".to_string()]).unwrap());
+        assert!(dependency_lock_needs_update(&lock_path, &["numpy".to_string()]).unwrap());
+        assert!(dependency_lock_needs_update(
+            &lock_path,
+            &["pyserial".to_string(), "numpy".to_string()]
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn write_dependency_lock_removes_file_when_specs_are_empty() {
+        let test_dir = std::env::temp_dir().join("senamby-runtime-env-lock-empty-tests");
+        let _ = fs::remove_dir_all(&test_dir);
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let lock_path = test_dir.join("requirements.lock.txt");
+        write_dependency_lock(&lock_path, &["pyserial".to_string()]).unwrap();
+        assert!(lock_path.exists());
+
+        write_dependency_lock(&lock_path, &[]).unwrap();
+        assert!(!lock_path.exists());
     }
 }

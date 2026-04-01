@@ -7,9 +7,7 @@
   import AnalyzerModule from '$lib/components/modules/AnalyzerModule.svelte';
   import PluginsModule from '$lib/components/modules/PluginsModule.svelte';
   import GlobalSettingsModal from '$lib/components/modals/GlobalSettingsModal.svelte';
-  import { listPlants } from '$lib/services/plant';
   import { loadSystemPlugins } from '$lib/services/plugin';
-  import { setPlantStats } from '$lib/stores/plantData';
 
   let showControllerPanel = $state(false);
   let isMobileLayout = $state(false);
@@ -31,13 +29,8 @@
     void (async () => {
       try {
         await loadSystemPlugins();
-        const plants = await listPlants();
-        appStore.setPlants(plants);
-        for (const plant of plants) {
-          setPlantStats(plant.id, plant.stats);
-        }
       } catch (error) {
-        console.error('Erro ao carregar plantas iniciais:', error);
+        console.error('Erro ao carregar plugins iniciais:', error);
       }
     })();
 
@@ -93,8 +86,8 @@
     <main class="flex-1 flex flex-col min-w-0 min-h-0 relative">
       <div class="flex-1 flex flex-col min-w-0 min-h-0" style:display={appStore.state.activeModule === 'plotter' ? 'flex' : 'none'}>
         <PlotterWorkspaceModule
-          plants={appStore.state.plants || []}
-          activePlantId={appStore.state.activePlantId ?? appStore.state.plants[0]?.id ?? ''}
+          plants={appStore.plotterPlants}
+          activePlantId={appStore.activePlotterPlantId ?? appStore.plotterPlants[0]?.id ?? ''}
           theme={appStore.state.theme || 'dark'}
           active={appStore.state.activeModule === 'plotter'}
           bind:showControllerPanel

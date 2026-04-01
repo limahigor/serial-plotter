@@ -16,8 +16,8 @@ use self::process::{
     wait_for_handshake,
 };
 use self::validation::{
-    ensure_driver_supports_write, validate_driver_write_support, validate_plugin_workspace_files,
-    validate_python_source_file, validate_runtime_controller,
+    ensure_driver_supports_write, validate_driver_write_support, validate_runtime_controller,
+    validate_runtime_driver,
 };
 use crate::core::error::{AppError, AppResult};
 use crate::core::models::plant::{
@@ -26,6 +26,7 @@ use crate::core::models::plant::{
 };
 use crate::core::models::plugin::{PluginRegistry, PluginRuntime, PluginType};
 use crate::core::services::plant::PlantService;
+use crate::core::services::plugin::PluginService;
 use crate::state::{PlantStore, PluginStore};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,7 @@ if missing:
     sys.exit(3)
 "#;
 const PYTHON_IMPORT_CLASS_CHECK_SCRIPT: &str = r#"
+import hashlib
 import importlib.util
 import pathlib
 import sys
@@ -96,14 +98,20 @@ class_name = sys.argv[2]
 required_methods = [name for name in sys.argv[3:] if name]
 
 sys.path.insert(0, str(source_path.parent))
-module_name = f"senamby_runtime_check_{source_path.stem}"
+module_hash = hashlib.sha1(str(source_path.resolve()).encode("utf-8")).hexdigest()[:12]
+module_name = f"senamby_runtime_check_{source_path.stem}_{module_hash}"
 spec = importlib.util.spec_from_file_location(module_name, source_path)
 if spec is None or spec.loader is None:
     print(f"Nao foi possivel carregar o modulo '{source_path}'", file=sys.stderr)
     sys.exit(2)
 
 module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+sys.modules[module_name] = module
+try:
+    spec.loader.exec_module(module)
+except Exception:
+    sys.modules.pop(module_name, None)
+    raise
 
 target_class = getattr(module, class_name, None)
 if target_class is None:
@@ -454,17 +462,15 @@ impl PlantRuntimeManager {
             &driver_plugin.name,
             PluginType::Driver,
         )?;
-        validate_plugin_workspace_files(&driver_dir, "driver")?;
-        validate_python_source_file(&venv_python_path, &driver_dir.join("main.py"), "driver")?;
+        validate_runtime_driver(&venv_python_path, driver_plugin)?;
         if !active_controllers.is_empty() {
             validate_driver_write_support(&venv_python_path, driver_plugin)?;
         }
         for controller in active_controllers {
-            validate_plugin_workspace_files(&controller.plugin_dir, "controlador")?;
-            validate_python_source_file(
+            validate_runtime_controller(
                 &venv_python_path,
-                &controller.plugin_dir.join("main.py"),
-                &format!("controlador '{}'", controller.instance.name),
+                &controller.plugin,
+                &controller.instance.name,
             )?;
         }
 
@@ -803,6 +809,7 @@ impl DriverRuntimeService {
         manager: &PlantRuntimeManager,
         plant_id: &str,
     ) -> AppResult<Plant> {
+        PluginService::load_all(plugins)?;
         let plant = plants.get(plant_id)?;
 
         if plant.connected {
@@ -933,6 +940,7 @@ impl DriverRuntimeService {
         manager: &PlantRuntimeManager,
         request: SavePlantControllerConfigRequest,
     ) -> AppResult<Plant> {
+        PluginService::load_all(plugins)?;
         let current_plant = plants.get(&request.plant_id)?;
         let request_controller_id = request.controller_id.clone();
         let runtime_python_path = if current_plant.connected {
@@ -1411,6 +1419,110 @@ class ControllerPython:
 
         assert_eq!(saved.controllers.len(), 1);
         assert!(saved.controllers[0].active);
+        assert_eq!(
+            saved.controllers[0].runtime_status,
+            ControllerRuntimeStatus::Synced
+        );
+        assert!(read_captured_commands(&commands_path).contains("\"type\":\"update_controllers\""));
+
+        manager.stop_runtime(app.handle(), &plant.id);
+    }
+
+    #[test]
+    fn save_controller_config_hot_updates_dataclass_controller_without_pending_restart() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let store = Arc::new(PlantStore::new());
+        let plugins = PluginStore::new();
+        let manager = PlantRuntimeManager::new();
+        let app = tauri::test::mock_app();
+
+        let driver_plugin = create_test_plugin(
+            &format!("driver_plugin_dataclass_{suffix}"),
+            &format!("Driver Python Dataclass {suffix}"),
+            PluginType::Driver,
+            "DriverPython",
+        );
+        save_test_plugin(
+            &driver_plugin,
+            r#"
+class DriverPython:
+    def __init__(self, context):
+        self.context = context
+    def connect(self):
+        return True
+    def stop(self):
+        return True
+    def read(self):
+        return {"sensors": {"sensor_1": 1.0}, "actuators": {"actuator_1": 0.0}}
+    def write(self, outputs):
+        return True
+"#,
+        );
+        plugins.insert(driver_plugin.clone()).unwrap();
+
+        let controller_plugin = create_test_plugin(
+            &format!("controller_plugin_dataclass_{suffix}"),
+            &format!("Controller Dataclass {suffix}"),
+            PluginType::Controller,
+            "ControllerDataclass",
+        );
+        save_test_plugin(
+            &controller_plugin,
+            r#"
+from dataclasses import dataclass
+
+@dataclass
+class Gains:
+    kp: float = 1.0
+
+class ControllerDataclass:
+    def __init__(self, context):
+        self.context = context
+        self.gains = Gains()
+    def compute(self, snapshot):
+        return {"actuator_1": self.gains.kp}
+"#,
+        );
+        plugins.insert(controller_plugin.clone()).unwrap();
+
+        let mut plant = create_test_plant(
+            &format!("plant_dataclass_{suffix}"),
+            &format!("Plant Dataclass {suffix}"),
+        );
+        plant.driver.plugin_id = driver_plugin.id.clone();
+        plant.driver.plugin_name = driver_plugin.name.clone();
+        WorkspaceService::save_plant_registry(&plant).unwrap();
+        store.insert(plant.clone()).unwrap();
+
+        let commands_path =
+            std::env::temp_dir().join(format!("senamby_runtime_dataclass_commands_{suffix}.jsonl"));
+        let _ = fs::remove_file(&commands_path);
+        insert_runtime_handle(
+            &manager,
+            &plant,
+            &format!("rt_dataclass_test_{suffix}"),
+            &commands_path,
+        );
+
+        let saved = DriverRuntimeService::save_controller_config(
+            store.as_ref(),
+            &plugins,
+            &manager,
+            SavePlantControllerConfigRequest {
+                plant_id: plant.id.clone(),
+                controller_id: "ctrl_dataclass".to_string(),
+                plugin_id: Some(controller_plugin.id.clone()),
+                name: "Controller Dataclass".to_string(),
+                controller_type: "PID".to_string(),
+                active: true,
+                input_variable_ids: vec!["var_0".to_string()],
+                output_variable_ids: vec!["var_1".to_string()],
+                params: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(saved.controllers.len(), 1);
         assert_eq!(
             saved.controllers[0].runtime_status,
             ControllerRuntimeStatus::Synced

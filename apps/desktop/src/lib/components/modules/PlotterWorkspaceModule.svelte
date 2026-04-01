@@ -35,7 +35,6 @@
     closePlant,
     connectPlant,
     disconnectPlant,
-    openPlant,
     pausePlant,
     removeController,
     resumePlant,
@@ -49,7 +48,11 @@
     type PlantRuntimeTelemetryEvent,
   } from '$lib/services/plant';
   import { createConfiguredController } from '$lib/services/plugin';
-  import { openFileDialog, FILE_FILTERS } from '$lib/services/fileDialog';
+  import {
+    applyOpenedPlantResult,
+    openPlantFilePath,
+    promptOpenPlantFile,
+  } from './plotter/openPlantFlow';
   import { getControllerActivationConflict } from '$lib/utils/controllerAssignments';
   import { buildContextSeriesControls, buildSeriesStyles, type SeriesStyle } from '$lib/utils/plotterSeries';
   import PluginInstanceConfigModal from '../modals/PluginInstanceConfigModal.svelte';
@@ -507,45 +510,22 @@
     };
   });
 
-  async function importPlantFile(file: File): Promise<void> {
-    const plantResult = await openPlant({ filePath: file.name, file });
-    if (plantResult.success && plantResult.plant) {
-      appStore.addPlant(plantResult.plant);
-      appStore.setActivePlantId(plantResult.plant.id);
-      setPlantData(plantResult.plant.id, plantResult.data ?? []);
-      setPlantSeriesCatalog(plantResult.seriesCatalog ?? buildPlantSeriesCatalog(plantResult.plant.id, plantResult.plant.variables));
-      setPlantStats(plantResult.plant.id, plantResult.stats ?? plantResult.plant.stats);
-      clearVariableStats(plantResult.plant.id);
-      for (const [index, stats] of (plantResult.variableStats ?? []).entries()) {
-        setVariableStats(plantResult.plant.id, index, stats);
-      }
-      if (plantResult.warning) {
-        showFeedbackModal({
-          type: 'error',
-          title: 'Driver ausente',
-          message: plantResult.warning,
-        });
-      }
-      return;
-    }
-
-    throw new Error(plantResult.error || 'Erro ao abrir planta');
-  }
-
   async function handleOpenFile() {
     openPlantLoading = true;
     try {
-      const result = await openFileDialog({
-        title: 'Abrir Planta',
-        filters: FILE_FILTERS.plant,
-      });
-
-      if (!result) {
-        openPlantLoading = false;
+      const plantResult = await promptOpenPlantFile();
+      if (!plantResult) {
         return;
       }
 
-      await importPlantFile(result.file);
+      const { warning } = applyOpenedPlantResult(plantResult);
+      if (warning) {
+        showFeedbackModal({
+          type: 'error',
+          title: 'Driver ausente',
+          message: warning,
+        });
+      }
     } catch (e) {
       console.error('Erro ao abrir planta:', e);
       showFeedbackModal({
@@ -1184,18 +1164,35 @@
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
 
-    if (!file.name.toLowerCase().endsWith('.json')) {
+    if (file.name.trim().toLowerCase() !== 'registry.json') {
       showFeedbackModal({
         type: 'warning',
         title: 'Arquivo inválido',
-        message: 'Apenas arquivos JSON exportados podem ser soltos no Plotter.',
+        message: 'Apenas arquivos registry.json podem ser soltos no Plotter.',
       });
       return;
     }
 
     openPlantLoading = true;
     try {
-      await importPlantFile(file);
+      const droppedPath = typeof (file as File & { path?: string }).path === 'string'
+        ? (file as File & { path?: string }).path
+        : '';
+
+      if (!droppedPath) {
+        throw new Error('Não foi possível resolver o caminho do registry.json selecionado.');
+      }
+
+      const { warning } = applyOpenedPlantResult(
+        await openPlantFilePath(droppedPath, file.name),
+      );
+      if (warning) {
+        showFeedbackModal({
+          type: 'error',
+          title: 'Driver ausente',
+          message: warning,
+        });
+      }
     } catch (error) {
       console.error('Erro ao abrir arquivo arrastado:', error);
       showFeedbackModal({
@@ -1237,6 +1234,7 @@
     onSelect={(id) => appStore.setActivePlantId(id)}
     onOpenFile={handleOpenFile}
     onCreateNew={handleCreateNew}
+    onReorder={(sourceId, targetId, position) => appStore.reorderPlants(sourceId, targetId, position)}
     onRemove={handleRemovePlant}
   />
 

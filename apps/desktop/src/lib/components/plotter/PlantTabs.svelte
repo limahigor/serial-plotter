@@ -9,6 +9,7 @@
     onSelect,
     onOpenFile,
     onCreateNew,
+    onReorder,
     onRemove
   }: {
     plants: Plant[];
@@ -16,6 +17,7 @@
     onSelect: (id: string) => void;
     onOpenFile: () => void;
     onCreateNew: () => void;
+    onReorder: (sourceId: string, targetId: string, position: 'before' | 'after') => void;
     onRemove: (id: string) => void;
   } = $props();
 
@@ -67,6 +69,7 @@
   activeId={resolvedActiveId}
   onSelect={onSelect}
   onAdd={handleAddClick}
+  onReorder={onReorder}
   onRemove={onRemove}
   addLabel="Nova planta"
   bind:addButtonRef

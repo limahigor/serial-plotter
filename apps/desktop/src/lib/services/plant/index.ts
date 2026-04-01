@@ -1,8 +1,6 @@
 export {
   createPlant,
   updatePlant,
-  listPlants,
-  getPlant,
   closePlant,
   removePlant,
   connectPlant,
@@ -27,7 +25,6 @@ export type {
   PlantActionResponse,
   PlantTelemetryPacket,
   PlantDto,
-  CreatePlantDto,
   SaveControllerInstanceConfigRequest,
   SaveControllerInstanceConfigResponse,
   RemoveControllerInstanceRequest,

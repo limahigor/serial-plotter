@@ -53,6 +53,17 @@ impl PlantStore {
         self.state.read().plants.values().cloned().collect()
     }
 
+    pub fn get_by_name(&self, name: &str) -> Option<Plant> {
+        let key = Self::name_key(name);
+        if key.is_empty() {
+            return None;
+        }
+
+        let state = self.state.read();
+        let plant_id = state.names.get(&key)?;
+        state.plants.get(plant_id).cloned()
+    }
+
     pub fn remove(&self, id: &str) -> AppResult<Plant> {
         let mut state = self.state.write();
         let plant = state
@@ -84,14 +95,7 @@ impl PlantStore {
         };
 
         if previous_name_key != next_name_key {
-            if let Some(existing_id) = state.names.get(&next_name_key) {
-                if existing_id != id {
-                    return Err(AppError::InvalidArgument(format!(
-                        "Planta com NOME '{}' já existe",
-                        plant_snapshot.name.trim()
-                    )));
-                }
-            }
+            Self::ensure_name_available(&state, &plant_snapshot.name, Some(id))?;
             state.names.remove(&previous_name_key);
             state.names.insert(next_name_key, plant_id);
         }
@@ -107,22 +111,7 @@ impl PlantStore {
                 .ok_or_else(|| AppError::NotFound(format!("Planta '{id}' não encontrada")))?;
             Self::name_key(&current.name)
         };
-        let next_name_key = Self::name_key(&next_plant.name);
-
-        if next_name_key.is_empty() {
-            return Err(AppError::InvalidArgument(
-                "Nome da planta é obrigatório".into(),
-            ));
-        }
-
-        if let Some(existing_id) = state.names.get(&next_name_key) {
-            if existing_id != id {
-                return Err(AppError::InvalidArgument(format!(
-                    "Planta com NOME '{}' já existe",
-                    next_plant.name.trim()
-                )));
-            }
-        }
+        let next_name_key = Self::ensure_name_available(&state, &next_plant.name, Some(id))?;
 
         state.names.remove(&previous_name_key);
         state.names.insert(next_name_key, next_plant.id.clone());
@@ -166,23 +155,36 @@ impl PlantStore {
             )));
         }
 
-        let name_key = Self::name_key(&plant.name);
+        let name_key = Self::ensure_name_available(state, &plant.name, None)?;
+
+        state.names.insert(name_key, plant.id.clone());
+        state.plants.insert(plant.id.clone(), plant);
+        Ok(())
+    }
+
+    fn ensure_name_available(
+        state: &PlantStoreInner,
+        name: &str,
+        current_id: Option<&str>,
+    ) -> AppResult<String> {
+        let name_key = Self::name_key(name);
         if name_key.is_empty() {
             return Err(AppError::InvalidArgument(
                 "Nome da planta é obrigatório".into(),
             ));
         }
 
-        if state.names.contains_key(&name_key) {
-            return Err(AppError::InvalidArgument(format!(
-                "Planta com NOME '{}' já existe",
-                plant.name.trim()
-            )));
+        if let Some(existing_id) = state.names.get(&name_key) {
+            if Some(existing_id.as_str()) != current_id {
+                return Err(Self::name_conflict_error(name));
+            }
         }
 
-        state.names.insert(name_key, plant.id.clone());
-        state.plants.insert(plant.id.clone(), plant);
-        Ok(())
+        Ok(name_key)
+    }
+
+    fn name_conflict_error(name: &str) -> AppError {
+        AppError::InvalidArgument(format!("Planta com NOME '{}' já existe", name.trim()))
     }
 
     fn name_key(name: &str) -> String {
