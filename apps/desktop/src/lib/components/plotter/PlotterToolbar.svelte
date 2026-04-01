@@ -41,6 +41,12 @@
   let exportButtonEl: HTMLButtonElement | undefined = $state();
   let exportMenuPosition = $state({ top: 0, left: 0 });
   const effectiveSamplingMs = $derived(dt > 0 ? dt * 1000 : 0);
+  const configuredSamplingLabel = $derived(
+    plant?.sampleTimeMs != null ? `${plant.sampleTimeMs} ms` : '--'
+  );
+  const effectiveSamplingLabel = $derived(
+    effectiveSamplingMs > 0 ? `${effectiveSamplingMs.toFixed(1)} ms` : '--'
+  );
 
   function handleExportCSV() {
     exportMenuOpen = false;
@@ -186,20 +192,6 @@
 
   <div class="plotter-toolbar__meta ml-auto flex shrink-0 items-center gap-3 sm:gap-6">
     <div class="plotter-toolbar__timing hidden md:flex items-center gap-4 mr-4">
-      {#if plant}
-        <div class="flex flex-col items-end">
-          <span class="text-[9px] font-bold text-slate-400 uppercase">Dt. Config.</span>
-          <div class="text-xs font-mono font-bold text-slate-600 dark:text-slate-300">
-            {plant.sampleTimeMs} ms
-          </div>
-        </div>
-      {/if}
-      <div class="flex flex-col items-end">
-        <span class="text-[9px] font-bold text-slate-400 uppercase">Dt. Real</span>
-        <div class="text-xs font-mono font-bold text-slate-600 dark:text-slate-300">
-          {effectiveSamplingMs > 0 ? `${effectiveSamplingMs.toFixed(1)} ms` : '--'}
-        </div>
-      </div>
       {#if plant?.connected}
         <div class="flex flex-col items-end">
           <span class="text-[9px] font-bold text-slate-400 uppercase">Uptime</span>
@@ -210,12 +202,24 @@
         </div>
       {/if}
     </div>
-    <div class="plotter-toolbar__status hidden sm:flex flex-col items-end mr-1">
-      <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Status</span>
-      <div class="flex items-center gap-1.5">
-        <span class={`w-2 h-2 rounded-full ${plant?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}></span>
-        <span class={`text-xs font-bold ${plant?.connected ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>
+    <div class="plotter-toolbar__status hidden sm:flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-2 shadow-sm dark:border-white/10 dark:bg-white/[0.03]">
+      <div class="flex items-center gap-1.5 pr-1">
+        <span class={`h-2 w-2 rounded-full ${plant?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}></span>
+        <span class={`text-xs font-bold tracking-wide ${plant?.connected ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>
           {plant?.connected ? 'ONLINE' : 'OFFLINE'}
+        </span>
+      </div>
+      <div class="h-7 w-px bg-slate-200 dark:bg-white/10"></div>
+      <div class="flex flex-col leading-none">
+        <span class="text-[9px] font-bold uppercase tracking-wide text-slate-400">Dt cfg</span>
+        <span class="mt-1 text-[11px] font-mono font-bold text-slate-600 dark:text-zinc-300">
+          {configuredSamplingLabel}
+        </span>
+      </div>
+      <div class="flex flex-col leading-none">
+        <span class="text-[9px] font-bold uppercase tracking-wide text-slate-400">Dt real</span>
+        <span class="mt-1 text-[11px] font-mono font-bold text-slate-600 dark:text-zinc-300">
+          {effectiveSamplingLabel}
         </span>
       </div>
     </div>
