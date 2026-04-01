@@ -581,6 +581,20 @@
     if (!plant) return;
 
     const isOffline = event.lifecycle_state === 'stopped' || event.lifecycle_state === 'faulted';
+    const knownRuntimeId = runtimeSessionByPlant.get(event.plant_id);
+
+    if (knownRuntimeId && knownRuntimeId !== event.runtime_id) {
+      return;
+    }
+
+    if (!knownRuntimeId) {
+      if (isOffline || !plant.connected) {
+        return;
+      }
+
+      runtimeSessionByPlant.set(event.plant_id, event.runtime_id);
+    }
+
     if (isOffline) {
       forgetRuntimeSession(event.plant_id);
     }
