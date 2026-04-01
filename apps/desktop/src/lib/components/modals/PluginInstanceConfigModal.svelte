@@ -1,6 +1,7 @@
 <script lang="ts">
   import { X, Plus, Trash2, Settings, AlertCircle, Check } from 'lucide-svelte';
   import ControllerVariableBindings from '../controllers/ControllerVariableBindings.svelte';
+  import DraftNumberInput from '../ui/DraftNumberInput.svelte';
   import type { PlantVariable } from '$lib/types/plant';
   import type { PluginDefinition, PluginInstance, SchemaFieldValue } from '$lib/types/plugin';
   import { getDefaultValueForType, isAutoSchemaField, SCHEMA_FIELD_TYPE_LABELS, isFieldRequired } from '$lib/types/plugin';
@@ -88,10 +89,9 @@
     config = { ...config, [fieldName]: value };
   }
 
-  function setNumber(fieldName: string, value: string, isFloat: boolean) {
+  function setNumber(fieldName: string, value: number) {
     if (isLockedField(fieldName)) return;
-    const parsed = isFloat ? parseFloat(value) : parseInt(value, 10);
-    config = { ...config, [fieldName]: isNaN(parsed) ? 0 : parsed };
+    config = { ...config, [fieldName]: value };
   }
 
   function setString(fieldName: string, value: string) {
@@ -304,23 +304,20 @@
                 </button>
 
               {:else if field.type === 'int'}
-                <input
-                  type="number"
-                  step="1"
-                  value={config[field.name] as number}
-                  oninput={(e) => setNumber(field.name, (e.target as HTMLInputElement).value, false)}
+                <DraftNumberInput
+                  value={typeof config[field.name] === 'number' ? (config[field.name] as number) : 0}
+                  integer={true}
                   disabled={locked}
-                  class="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#18181b] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:cursor-not-allowed disabled:bg-slate-50 dark:disabled:bg-white/[0.03]"
+                  inputClass="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#18181b] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:cursor-not-allowed disabled:bg-slate-50 dark:disabled:bg-white/[0.03]"
+                  onCommit={(nextValue) => setNumber(field.name, nextValue)}
                 />
 
               {:else if field.type === 'float'}
-                <input
-                  type="number"
-                  step="any"
-                  value={config[field.name] as number}
-                  oninput={(e) => setNumber(field.name, (e.target as HTMLInputElement).value, true)}
+                <DraftNumberInput
+                  value={typeof config[field.name] === 'number' ? (config[field.name] as number) : 0}
                   disabled={locked}
-                  class="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#18181b] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:cursor-not-allowed disabled:bg-slate-50 dark:disabled:bg-white/[0.03]"
+                  inputClass="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#18181b] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:cursor-not-allowed disabled:bg-slate-50 dark:disabled:bg-white/[0.03]"
+                  onCommit={(nextValue) => setNumber(field.name, nextValue)}
                 />
 
               {:else if field.type === 'string'}

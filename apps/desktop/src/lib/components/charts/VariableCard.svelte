@@ -28,6 +28,7 @@
     lineStyles?: Record<string, { color: string; visible: boolean; label?: string }>;
     showLegend?: boolean;
     stats?: VariableStats;
+    liveTick?: number;
     onRangeChange?: (xMin: number, xMax: number) => void;
     onViewportChange?: (viewport: { xMin: number; xMax: number; yMin: number; yMax: number }) => void;
   }
@@ -48,6 +49,7 @@
     lineStyles = {},
     showLegend = true,
     stats,
+    liveTick = 0,
     onRangeChange,
     onViewportChange,
   }: Props = $props();
@@ -112,9 +114,16 @@
   const isCollapsedActuator = $derived(hasActuatorChart && layoutMode === 'collapsed');
   const showActuatorChart = $derived(hasActuatorChart && (!isCollapsedActuator || actuatorExpanded));
   const sensorXAxisMode = $derived(showActuatorChart ? 'grid-only' : 'full');
-  const currentPvValue = $derived.by(() => getCurrentValue(pvData, pvKey));
-  const currentSpValue = $derived.by(() => getCurrentValue(pvData, spKey));
+  const currentPvValue = $derived.by(() => {
+    liveTick;
+    return getCurrentValue(pvData, pvKey);
+  });
+  const currentSpValue = $derived.by(() => {
+    liveTick;
+    return getCurrentValue(pvData, spKey);
+  });
   const currentActuatorValueById = $derived.by(() => {
+    liveTick;
     const values: Record<string, number | null> = {};
     for (const actuator of actuators) {
       values[actuator.id] = getCurrentValue(mvData, actuator.dataKey);
@@ -122,6 +131,7 @@
     return values;
   });
   const resolvedStats = $derived.by(() => {
+    liveTick;
     const liveError = currentSpValue != null && currentPvValue != null ? currentSpValue - currentPvValue : null;
     const liveRipple = computeSignalRipplePercent(pvData, pvKey, RIPPLE_WINDOW_SAMPLES);
     const liveStability = liveRipple == null ? null : clamp(100 - liveRipple, 0, 100);

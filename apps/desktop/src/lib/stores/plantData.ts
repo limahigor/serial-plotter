@@ -28,6 +28,9 @@ const DEFAULT_BUFFER_CONFIG: Readonly<PlantTelemetryBufferConfig> = Object.freez
   maxPoints: 20_000,
   trimTo: 15_000,
 });
+const TARGET_BUFFER_DURATION_SECONDS = 2_000;
+const MAX_ADAPTIVE_BUFFER_POINTS = 250_000;
+const ADAPTIVE_TRIM_RATIO = 0.8;
 
 function normalizeBufferConfig(config: Partial<PlantTelemetryBufferConfig> = {}): PlantTelemetryBufferConfig {
   const maxPoints = Math.max(1_000, Math.floor(config.maxPoints ?? DEFAULT_BUFFER_CONFIG.maxPoints));
@@ -41,6 +44,24 @@ function normalizeBufferConfig(config: Partial<PlantTelemetryBufferConfig> = {})
 
 function getResolvedBufferConfig(plantId: string): PlantTelemetryBufferConfig {
   return _bufferConfig.get(plantId) ?? { ...DEFAULT_BUFFER_CONFIG };
+}
+
+export function getRecommendedPlantBufferConfig(sampleTimeMs: number): PlantTelemetryBufferConfig {
+  const normalizedSampleTimeMs = Math.max(1, Math.round(sampleTimeMs || 0));
+  const targetPoints = Math.ceil((TARGET_BUFFER_DURATION_SECONDS * 1000) / normalizedSampleTimeMs);
+  const maxPoints = Math.max(
+    DEFAULT_BUFFER_CONFIG.maxPoints,
+    Math.min(MAX_ADAPTIVE_BUFFER_POINTS, targetPoints),
+  );
+  const trimTo = Math.max(
+    DEFAULT_BUFFER_CONFIG.trimTo,
+    Math.floor(maxPoints * ADAPTIVE_TRIM_RATIO),
+  );
+
+  return normalizeBufferConfig({
+    maxPoints,
+    trimTo,
+  });
 }
 
 function trimDataInPlace(plantId: string, data: PlantDataPoint[]): PlantDataPoint[] {

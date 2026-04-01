@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DraftNumberInput from './DraftNumberInput.svelte';
   import SimpleToggle from './SimpleToggle.svelte';
   import type { ParamType } from '$lib/types/controller';
 
@@ -14,7 +15,6 @@
   const id = `param-${crypto.randomUUID().substring(0, 8)}`;
 
   let draftValue = $state('');
-  let error = $state<string | null>(null);
   let lastReportedValidity = $state<boolean | null>(null);
 
   function notifyValidity(isValid: boolean) {
@@ -35,18 +35,17 @@
 
   $effect(() => {
     if (type === 'boolean') {
-      error = null;
       notifyValidity(true);
       return;
     }
 
-    syncDraft(value);
-    error = null;
-    notifyValidity(true);
+    if (type === 'string') {
+      syncDraft(value);
+      notifyValidity(true);
+    }
   });
 
   function handleToggleChange() {
-    error = null;
     notifyValidity(true);
     onChange?.(!(value as boolean));
   }
@@ -54,31 +53,8 @@
   function handleTextInput(event: Event) {
     const nextValue = (event.target as HTMLInputElement).value;
     draftValue = nextValue;
-    error = null;
     notifyValidity(true);
     onChange?.(nextValue);
-  }
-
-  function handleNumberInput(event: Event) {
-    const nextValue = (event.target as HTMLInputElement).value;
-    draftValue = nextValue;
-
-    if (!nextValue.trim()) {
-      error = 'Informe um numero valido';
-      notifyValidity(false);
-      return;
-    }
-
-    const parsed = Number(nextValue);
-    if (!Number.isFinite(parsed)) {
-      error = 'Informe um numero valido';
-      notifyValidity(false);
-      return;
-    }
-
-    error = null;
-    notifyValidity(true);
-    onChange?.(parsed);
   }
 </script>
 
@@ -95,23 +71,22 @@
   <div class="flex items-start justify-between gap-3 group">
     <label for={id} class="pt-2 text-xs font-medium text-slate-600 dark:text-slate-400 truncate flex-1">{label}</label>
     <div class="relative w-28">
-      <input
-        {id}
-        type={type === 'number' ? 'number' : 'text'}
-        step={type === 'number' ? '0.01' : undefined}
-        value={draftValue}
-        oninput={type === 'number' ? handleNumberInput : handleTextInput}
-        class={`
-          w-full bg-white dark:bg-zinc-800 border border-slate-300 dark:border-white/10 rounded-md px-2.5 py-1.5 text-xs text-slate-900 dark:text-zinc-200 outline-none
-          focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all shadow-sm
-          ${error ? 'border-red-400 focus:border-red-500 focus:ring-red-500/20' : ''}
-          ${type === 'number' ? 'font-mono text-center' : 'text-left'}
-        `}
-      />
-      {#if error}
-        <div class="mt-1 text-[10px] text-red-500 dark:text-red-400 text-right">
-          {error}
-        </div>
+      {#if type === 'number'}
+        <DraftNumberInput
+          inputId={id}
+          value={typeof value === 'number' ? value : 0}
+          inputClass="w-full bg-white dark:bg-zinc-800 border border-slate-300 dark:border-white/10 rounded-md px-2.5 py-1.5 text-xs text-slate-900 dark:text-zinc-200 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all shadow-sm font-mono text-center"
+          onCommit={(nextValue) => onChange?.(nextValue)}
+          {onValidityChange}
+        />
+      {:else}
+        <input
+          {id}
+          type="text"
+          value={draftValue}
+          oninput={handleTextInput}
+          class="w-full bg-white dark:bg-zinc-800 border border-slate-300 dark:border-white/10 rounded-md px-2.5 py-1.5 text-xs text-slate-900 dark:text-zinc-200 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all shadow-sm text-left"
+        />
       {/if}
     </div>
   </div>

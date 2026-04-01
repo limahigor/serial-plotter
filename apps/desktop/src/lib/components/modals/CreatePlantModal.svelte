@@ -17,6 +17,7 @@
     syncDriverWithVariables,
   } from '$lib/utils/plantEditor';
   import CreatePluginModal from './CreatePluginModal.svelte';
+  import DraftNumberInput from '../ui/DraftNumberInput.svelte';
   import PluginInstanceConfigModal from './PluginInstanceConfigModal.svelte';
 
   interface Props {
@@ -591,13 +592,13 @@
               <span class="block text-sm font-medium text-slate-700 dark:text-zinc-300 mb-2">
                 Tempo de Amostragem (ms) *
               </span>
-              <input
-                type="number"
-                min="1"
-                step="1"
-                bind:value={sampleTimeMs}
+              <DraftNumberInput
+                value={sampleTimeMs}
+                integer={true}
+                min={1}
                 placeholder="Ex: 100"
-                class="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#18181b] text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                inputClass="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#18181b] text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
+                onCommit={(nextValue) => sampleTimeMs = nextValue}
               />
               <p class="mt-2 text-xs text-slate-500 dark:text-zinc-400">
                 Intervalo entre amostras da planta.
@@ -897,30 +898,27 @@
                       {#if variable.type === 'sensor'}
                         <label class="block">
                           <span class="text-[10px] text-slate-400 dark:text-zinc-500 uppercase mb-1.5 block">Setpoint</span>
-                          <input
-                            type="number"
+                          <DraftNumberInput
                             value={variable.setpoint}
-                            oninput={(event) => updateVariable(index, 'setpoint', Number((event.target as HTMLInputElement).value))}
-                            class="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                            inputClass="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                            onCommit={(nextValue) => updateVariable(index, 'setpoint', nextValue)}
                           />
                         </label>
                       {/if}
                       <label class="block">
                         <span class="text-[10px] text-slate-400 dark:text-zinc-500 uppercase mb-1.5 block">{variable.type === 'sensor' ? 'PV Min' : 'MV Min'}</span>
-                        <input
-                          type="number"
+                        <DraftNumberInput
                           value={variable.pvMin}
-                          oninput={(event) => updateVariable(index, 'pvMin', Number((event.target as HTMLInputElement).value))}
-                          class="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                          inputClass="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                          onCommit={(nextValue) => updateVariable(index, 'pvMin', nextValue)}
                         />
                       </label>
                       <label class="block">
                         <span class="text-[10px] text-slate-400 dark:text-zinc-500 uppercase mb-1.5 block">{variable.type === 'sensor' ? 'PV Max' : 'MV Max'}</span>
-                        <input
-                          type="number"
+                        <DraftNumberInput
                           value={variable.pvMax}
-                          oninput={(event) => updateVariable(index, 'pvMax', Number((event.target as HTMLInputElement).value))}
-                          class="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                          inputClass="w-full h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                          onCommit={(nextValue) => updateVariable(index, 'pvMax', nextValue)}
                         />
                       </label>
                     </div>

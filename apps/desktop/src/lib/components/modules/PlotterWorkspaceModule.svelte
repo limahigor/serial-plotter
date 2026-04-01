@@ -4,16 +4,15 @@
   import { appStore } from '$lib/stores/data.svelte';
   import {
     clearPlant,
-    clearVariableStats,
     getPlantData,
     getPlantSeriesCatalog,
     getPlantStats,
+    getRecommendedPlantBufferConfig,
     getVariableStats,
     seedPlantSeriesCatalog,
-    setPlantData,
+    setPlantBufferConfig,
     setPlantSeriesCatalog,
     setPlantStats,
-    setVariableStats,
   } from '$lib/stores/plantData';
   import { exportPlantDataCSV, exportPlantDataJSON } from '$lib/services/export';
   import { formatTime } from '$lib/utils/format';
@@ -49,8 +48,6 @@
     resumePlant,
     saveController,
     saveSetpoint,
-    applyPlantTelemetryPacket,
-    buildTelemetryPacketFromRuntimeEvent,
     subscribePlantRuntimeEvents,
     type PlantRuntimeErrorEvent,
     type PlantRuntimeStatusEvent,
@@ -58,10 +55,20 @@
   } from '$lib/services/plant';
   import { createConfiguredController } from '$lib/services/plugin';
   import {
-    applyOpenedPlantResult,
-    openPlantFilePath,
-    promptOpenPlantFile,
+    isRegistryJsonFile,
+    openDroppedRegistryFile,
+    openPlantFromDialog,
   } from './plotter/openPlantFlow';
+  import {
+    buildChartConfigsByVariableIndex,
+    hasDraggedFiles,
+    resolveContextMenuPosition,
+    resetPlantZoomState,
+    resetScaleStatesForPlant,
+    syncChartStateMaps,
+    updateScaleStateMap,
+  } from './plotter/chartState.js';
+  import { createRuntimeTelemetryManager } from './plotter/runtimeTelemetry';
   import { getControllerActivationConflict } from '$lib/utils/controllerAssignments';
   import { buildContextSeriesControls, buildSeriesStyles, type SeriesStyle } from '$lib/utils/plotterSeries';
   import PluginInstanceConfigModal from '../modals/PluginInstanceConfigModal.svelte';
@@ -74,6 +81,8 @@
     actuatorVariables: PlantVariable[];
   }
 
+  type EditableControllerField = 'name' | 'active' | 'inputVariableIds' | 'outputVariableIds';
+
   const EMPTY_VARIABLE_GROUPS: ActiveVariableGroups = {
     sensorEntries: [],
     sensorVariables: [],
@@ -82,142 +91,20 @@
 
   let chartViewStatesByPlant: Record<string, ChartViewState> = $state({});
   let chartScaleStatesByPlant: Record<string, Record<number, ChartScaleState>> = $state({});
-  const runtimeSessionByPlant = new Map<string, string>();
-  const telemetryBacklogByPlant = new Map<string, { runtimeId: string; packets: ReturnType<typeof buildTelemetryPacketFromRuntimeEvent>[] }>();
-  const liveTelemetryByPlant = new Map<string, { plant: Plant; packets: ReturnType<typeof buildTelemetryPacketFromRuntimeEvent>[]; latestStats: Plant['stats'] }>();
-  let telemetryFlushFrame = 0;
-
-  function getSensorIndices(plant: Plant): number[] {
-    const sensorIndices: number[] = [];
-
-    for (const [index, variable] of plant.variables.entries()) {
-      if (variable.type === 'sensor') {
-        sensorIndices.push(index);
-      }
-    }
-
-    return sensorIndices;
-  }
-
-  function buildSyncedChartViewState(
-    currentState: ChartViewState | undefined,
-    sensorCount: number,
-  ): ChartViewState | null {
-    if (!currentState) {
-      return defaultChartViewState(sensorCount);
-    }
-
-    const focusedVariableIndex = Math.max(
-      0,
-      Math.min(currentState.focusedVariableIndex, Math.max(sensorCount - 1, 0)),
-    );
-
-    if (
-      currentState.variableCount === sensorCount &&
-      currentState.focusedVariableIndex === focusedVariableIndex
-    ) {
-      return null;
-    }
-
-    return {
-      ...currentState,
-      variableCount: sensorCount,
-      focusedVariableIndex,
-    };
-  }
-
-  function buildSyncedChartScaleStates(
-    currentStates: Record<number, ChartScaleState> | undefined,
-    sensorIndices: number[],
-  ): Record<number, ChartScaleState> | null {
-    const sensorIndexSet = new Set(sensorIndices);
-    const existingStates = currentStates ?? {};
-    const nextStates: Record<number, ChartScaleState> = {};
-    let changed = !currentStates;
-
-    for (const sensorIndex of sensorIndices) {
-      const currentState = existingStates[sensorIndex];
-      if (currentState) {
-        nextStates[sensorIndex] = currentState;
-      } else {
-        nextStates[sensorIndex] = defaultChartScaleState();
-        changed = true;
-      }
-    }
-
-    if (!changed) {
-      for (const key of Object.keys(existingStates)) {
-        if (!sensorIndexSet.has(Number(key))) {
-          changed = true;
-          break;
-        }
-      }
-    }
-
-    return changed ? nextStates : null;
-  }
-
-  function pruneOrphanPlantStates<T>(
-    currentStates: Record<string, T>,
-    activePlantIds: Set<string>,
-  ): Record<string, T> | null {
-    for (const plantId of Object.keys(currentStates)) {
-      if (!activePlantIds.has(plantId)) {
-        const nextStates = { ...currentStates };
-
-        for (const orphanPlantId of Object.keys(nextStates)) {
-          if (!activePlantIds.has(orphanPlantId)) {
-            delete nextStates[orphanPlantId];
-          }
-        }
-
-        return nextStates;
-      }
-    }
-
-    return null;
-  }
 
   $effect(() => {
-    const activePlantIds = new Set<string>(plants.map((plant: Plant) => plant.id));
-    let nextChartViewStates = chartViewStatesByPlant;
-    let nextChartScaleStates = chartScaleStatesByPlant;
+    const next = syncChartStateMaps(
+      plants,
+      chartViewStatesByPlant,
+      chartScaleStatesByPlant,
+    );
 
-    for (const plant of plants) {
-      const sensorIndices = getSensorIndices(plant);
-      const nextViewState = buildSyncedChartViewState(nextChartViewStates[plant.id], sensorIndices.length);
-      if (nextViewState) {
-        if (nextChartViewStates === chartViewStatesByPlant) {
-          nextChartViewStates = { ...chartViewStatesByPlant };
-        }
-        nextChartViewStates[plant.id] = nextViewState;
-      }
-
-      const nextScaleStates = buildSyncedChartScaleStates(nextChartScaleStates[plant.id], sensorIndices);
-      if (nextScaleStates) {
-        if (nextChartScaleStates === chartScaleStatesByPlant) {
-          nextChartScaleStates = { ...chartScaleStatesByPlant };
-        }
-        nextChartScaleStates[plant.id] = nextScaleStates;
-      }
+    if (next.chartViewStatesByPlant !== chartViewStatesByPlant) {
+      chartViewStatesByPlant = next.chartViewStatesByPlant;
     }
 
-    const prunedChartViewStates = pruneOrphanPlantStates(nextChartViewStates, activePlantIds);
-    if (prunedChartViewStates) {
-      nextChartViewStates = prunedChartViewStates;
-    }
-
-    const prunedChartScaleStates = pruneOrphanPlantStates(nextChartScaleStates, activePlantIds);
-    if (prunedChartScaleStates) {
-      nextChartScaleStates = prunedChartScaleStates;
-    }
-
-    if (nextChartViewStates !== chartViewStatesByPlant) {
-      chartViewStatesByPlant = nextChartViewStates;
-    }
-
-    if (nextChartScaleStates !== chartScaleStatesByPlant) {
-      chartScaleStatesByPlant = nextChartScaleStates;
+    if (next.chartScaleStatesByPlant !== chartScaleStatesByPlant) {
+      chartScaleStatesByPlant = next.chartScaleStatesByPlant;
     }
   });
 
@@ -314,12 +201,6 @@
     () => new Map(activeSeriesCatalog.map((entry) => [entry.key, entry]))
   );
 
-  const focusedSensor = $derived.by(() => {
-    if (sensorVariables.length === 0) return null;
-    const safeIndex = Math.max(0, Math.min(chartViewState.focusedVariableIndex, sensorVariables.length - 1));
-    return sensorVariables[safeIndex];
-  });
-
   const contextSensor = $derived.by(() => {
     if (sensorVariables.length === 0) return null;
     const safeIndex = Math.max(0, Math.min(contextSensorIndex, sensorVariables.length - 1));
@@ -376,166 +257,6 @@
     };
   }
 
-  function resetPlantTelemetryState(plant: Plant) {
-    clearPlant(plant.id);
-    setPlantSeriesCatalog(buildPlantSeriesCatalog(plant.id, plant.variables));
-    setPlantStats(plant.id, {
-      dt: plant.sampleTimeMs / 1000,
-      uptime: 0,
-    });
-    clearVariableStats(plant.id);
-  }
-
-  function clearTelemetryBacklog(plantId: string) {
-    telemetryBacklogByPlant.delete(plantId);
-  }
-
-  function forgetRuntimeSession(plantId: string) {
-    clearTelemetryBacklog(plantId);
-    liveTelemetryByPlant.delete(plantId);
-    runtimeSessionByPlant.delete(plantId);
-  }
-
-  function rememberRuntimeSession(plantId: string, runtimeId: string): boolean {
-    if (runtimeSessionByPlant.get(plantId) === runtimeId) {
-      return false;
-    }
-
-    clearTelemetryBacklog(plantId);
-    liveTelemetryByPlant.delete(plantId);
-    runtimeSessionByPlant.set(plantId, runtimeId);
-    return true;
-  }
-
-  function queueTelemetryPacket(plantId: string, runtimeId: string, packet: ReturnType<typeof buildTelemetryPacketFromRuntimeEvent>) {
-    const current = telemetryBacklogByPlant.get(plantId);
-    if (!current || current.runtimeId !== runtimeId) {
-      telemetryBacklogByPlant.set(plantId, {
-        runtimeId,
-        packets: [packet],
-      });
-      return;
-    }
-
-    current.packets.push(packet);
-  }
-
-  function flushTelemetryBacklog(plantId: string, basePlant?: Plant) {
-    const backlog = telemetryBacklogByPlant.get(plantId);
-    if (!backlog || backlog.packets.length === 0) {
-      clearTelemetryBacklog(plantId);
-      return;
-    }
-
-    clearTelemetryBacklog(plantId);
-    const plant = basePlant ?? findPlantById(plantId);
-    if (!plant) {
-      return;
-    }
-
-    let latestStats = plant.stats;
-    for (const packet of backlog.packets) {
-      applyPlantTelemetryPacket(packet);
-      if (packet.stats) {
-        latestStats = packet.stats;
-      }
-    }
-
-    appStore.upsertPlant({
-      ...plant,
-      stats: latestStats,
-    });
-  }
-
-  function flushLiveTelemetry() {
-    telemetryFlushFrame = 0;
-
-    for (const [plantId, queued] of liveTelemetryByPlant.entries()) {
-      let latestStats = queued.latestStats;
-      for (const packet of queued.packets) {
-        applyPlantTelemetryPacket(packet);
-        if (packet.stats) {
-          latestStats = packet.stats;
-        }
-      }
-
-      appStore.upsertPlant({
-        ...queued.plant,
-        stats: latestStats,
-      });
-      liveTelemetryByPlant.delete(plantId);
-    }
-  }
-
-  function scheduleLiveTelemetryFlush() {
-    if (telemetryFlushFrame !== 0) return;
-    telemetryFlushFrame = requestAnimationFrame(() => {
-      flushLiveTelemetry();
-    });
-  }
-
-  function enqueueLiveTelemetryPacket(plant: Plant, packet: ReturnType<typeof buildTelemetryPacketFromRuntimeEvent>) {
-    const current = liveTelemetryByPlant.get(plant.id);
-    if (!current) {
-      liveTelemetryByPlant.set(plant.id, {
-        plant,
-        packets: [packet],
-        latestStats: packet.stats ?? plant.stats,
-      });
-    } else {
-      current.plant = plant;
-      current.packets.push(packet);
-      current.latestStats = packet.stats ?? current.latestStats;
-    }
-
-    scheduleLiveTelemetryFlush();
-  }
-
-  function resetScaleStatesForPlant(plantId: string) {
-    const currentStates = chartScaleStatesByPlant[plantId] ?? {};
-    chartScaleStatesByPlant = {
-      ...chartScaleStatesByPlant,
-      [plantId]: Object.fromEntries(
-        Object.keys(currentStates).map((key) => [Number(key), defaultChartScaleState()]),
-      ),
-    };
-  }
-
-  function updateScaleState(
-    plantId: string,
-    variableIndex: number,
-    updater: (current: ChartScaleState) => ChartScaleState,
-  ) {
-    const currentStates = chartScaleStatesByPlant[plantId] ?? {};
-    const currentState = currentStates[variableIndex] ?? defaultChartScaleState();
-
-    chartScaleStatesByPlant = {
-      ...chartScaleStatesByPlant,
-      [plantId]: {
-        ...currentStates,
-        [variableIndex]: updater(currentState),
-      },
-    };
-  }
-
-  function resetPlantZoomState(plantId: string) {
-    const currentStates = chartScaleStatesByPlant[plantId] ?? {};
-    chartScaleStatesByPlant = {
-      ...chartScaleStatesByPlant,
-      [plantId]: Object.fromEntries(
-        Object.entries(currentStates).map(([key, state]) => [
-          Number(key),
-          {
-            ...state,
-            xMode: 'auto',
-            xMin: null,
-            xMax: null,
-          },
-        ]),
-      ),
-    };
-  }
-
   function showFeedbackModal(options: {
     type?: 'info' | 'error' | 'warning' | 'success';
     title: string;
@@ -555,59 +276,43 @@
     feedbackModal.visible = false;
   }
 
-  function findPlantById(plantId: string): Plant | undefined {
-    return plantsById.get(plantId);
+  function showActionFailure(title: string, error: string | undefined, fallback: string) {
+    showFeedbackModal({
+      type: 'error',
+      title,
+      message: error || fallback,
+    });
   }
 
+  function getActivePlant(): Plant | null {
+    return activePlant ?? null;
+  }
+
+  function isEditableControllerField(field: string): field is EditableControllerField {
+    return (
+      field === 'name' ||
+      field === 'active' ||
+      field === 'inputVariableIds' ||
+      field === 'outputVariableIds'
+    );
+  }
+
+  function findActiveController(controllerId: string): Controller | undefined {
+    return activePlant?.controllers.find((controller: Controller) => controller.id === controllerId);
+  }
+
+  const telemetryManager = createRuntimeTelemetryManager({
+    findPlantById: (plantId) => plantsById.get(plantId),
+    updatePlantRuntimeState: (plantId, runtimeState) =>
+      appStore.updatePlantRuntimeState(plantId, runtimeState),
+  });
+
   function handleRuntimeTelemetry(event: PlantRuntimeTelemetryEvent) {
-    const plant = findPlantById(event.plant_id);
-    if (!plant) return;
-
-    if (rememberRuntimeSession(event.plant_id, event.runtime_id)) {
-      resetPlantTelemetryState(plant);
-    }
-
-    const packet = buildTelemetryPacketFromRuntimeEvent(plant, event);
-    if (plant.paused) {
-      queueTelemetryPacket(plant.id, event.runtime_id, packet);
-      return;
-    }
-
-    enqueueLiveTelemetryPacket(plant, packet);
+    telemetryManager.handleRuntimeTelemetry(event);
   }
 
   function handleRuntimeStatus(event: PlantRuntimeStatusEvent) {
-    const plant = findPlantById(event.plant_id);
-    if (!plant) return;
-
-    const isOffline = event.lifecycle_state === 'stopped' || event.lifecycle_state === 'faulted';
-    const knownRuntimeId = runtimeSessionByPlant.get(event.plant_id);
-
-    if (knownRuntimeId && knownRuntimeId !== event.runtime_id) {
-      return;
-    }
-
-    if (!knownRuntimeId) {
-      if (isOffline || !plant.connected) {
-        return;
-      }
-
-      runtimeSessionByPlant.set(event.plant_id, event.runtime_id);
-    }
-
-    if (isOffline) {
-      forgetRuntimeSession(event.plant_id);
-    }
-
-    appStore.upsertPlant({
-      ...plant,
-      connected: !isOffline && (plant.connected || event.lifecycle_state === 'running'),
-      paused: isOffline ? false : plant.paused,
-      stats: {
-        ...plant.stats,
-        dt: plant.paused && !isOffline ? plant.stats.dt : Math.max(0, event.effective_dt_ms / 1000),
-      },
-    });
+    telemetryManager.handleRuntimeStatus(event);
   }
 
   function handleRuntimeError(event: PlantRuntimeErrorEvent) {
@@ -615,13 +320,9 @@
       return;
     }
 
-    const plant = findPlantById(event.plant_id);
+    const plant = plantsById.get(event.plant_id);
     const title = plant ? `Falha na planta "${plant.name}"` : 'Falha na runtime da planta';
-    showFeedbackModal({
-      type: 'error',
-      title,
-      message: event.message,
-    });
+    showActionFailure(title, event.message, 'Falha na runtime da planta.');
   }
 
   onMount(() => {
@@ -671,9 +372,7 @@
 
     return () => {
       disposed = true;
-      if (telemetryFlushFrame !== 0) {
-        cancelAnimationFrame(telemetryFlushFrame);
-      }
+      telemetryManager.dispose();
       unsubscribe?.();
       window.removeEventListener('pointerdown', handleGlobalPointerDown);
       window.removeEventListener('scroll', handleGlobalScroll, true);
@@ -684,26 +383,25 @@
   async function handleOpenFile() {
     openPlantLoading = true;
     try {
-      const plantResult = await promptOpenPlantFile();
-      if (!plantResult) {
+      const result = await openPlantFromDialog();
+      if (result.cancelled) {
         return;
       }
 
-      const { warning } = applyOpenedPlantResult(plantResult);
-      if (warning) {
+      if (result.warning) {
         showFeedbackModal({
           type: 'error',
           title: 'Driver ausente',
-          message: warning,
+          message: result.warning,
         });
       }
     } catch (e) {
       console.error('Erro ao abrir planta:', e);
-      showFeedbackModal({
-        type: 'error',
-        title: 'Falha ao abrir planta',
-        message: e instanceof Error ? e.message : 'Erro ao abrir planta',
-      });
+      showActionFailure(
+        'Falha ao abrir planta',
+        e instanceof Error ? e.message : undefined,
+        'Erro ao abrir planta',
+      );
     } finally {
       openPlantLoading = false;
     }
@@ -731,6 +429,7 @@
     appStore.setActivePlantId(plant.id);
     setPlantSeriesCatalog(buildPlantSeriesCatalog(plant.id, plant.variables));
     setPlantStats(plant.id, plant.stats);
+    setPlantBufferConfig(plant.id, getRecommendedPlantBufferConfig(plant.sampleTimeMs));
     createPlantModal = false;
     editPlantModal = false;
   }
@@ -739,7 +438,7 @@
     removeModal = {
       visible: true,
       plantId,
-      plantName: plants.find((p: Plant) => p.id === plantId)?.name || '',
+      plantName: plantsById.get(plantId)?.name || '',
       reason: 'confirm'
     };
   }
@@ -751,19 +450,19 @@
       if (result.success) {
         appStore.removePlant(removeModal.plantId);
         clearPlant(removeModal.plantId);
-        forgetRuntimeSession(removeModal.plantId);
-        const remainingViewStates = { ...chartViewStatesByPlant };
-        const remainingScaleStates = { ...chartScaleStatesByPlant };
-        delete remainingViewStates[removeModal.plantId];
-        delete remainingScaleStates[removeModal.plantId];
-        chartViewStatesByPlant = remainingViewStates;
-        chartScaleStatesByPlant = remainingScaleStates;
+        telemetryManager.forgetRuntimeSession(removeModal.plantId);
+        chartViewStatesByPlant = Object.fromEntries(
+          Object.entries(chartViewStatesByPlant).filter(([plantId]) => plantId !== removeModal.plantId),
+        );
+        chartScaleStatesByPlant = Object.fromEntries(
+          Object.entries(chartScaleStatesByPlant).filter(([plantId]) => plantId !== removeModal.plantId),
+        );
       } else {
-        showFeedbackModal({
-          type: 'error',
-          title: 'Falha ao fechar planta',
-          message: result.error || 'Erro ao descarregar a planta do backend',
-        });
+        showActionFailure(
+          'Falha ao fechar planta',
+          result.error,
+          'Erro ao descarregar a planta do backend',
+        );
       }
 
       plantActionLoading = null;
@@ -776,62 +475,67 @@
   }
 
   async function handleToggleConnect() {
-    if (!activePlant) return;
-    if (!activePlant.connected && !activePlant.driver?.pluginId) {
-      showFeedbackModal({
-        type: 'error',
-        title: 'Driver obrigatório',
-        message: connectDisabledReason || 'Configure um driver de comunicação antes de ligar a planta.',
-      });
+    const plant = getActivePlant();
+    if (!plant) return;
+
+    if (!plant.connected && !plant.driver?.pluginId) {
+      showActionFailure(
+        'Driver obrigatório',
+        connectDisabledReason,
+        'Configure um driver de comunicação antes de ligar a planta.',
+      );
       return;
     }
 
-    const wasConnected = activePlant.connected;
+    const wasConnected = plant.connected;
     plantActionLoading = 'connect';
-    const result = activePlant.connected
-      ? await disconnectPlant(activePlant.id)
-      : await connectPlant(activePlant.id);
+    const result = plant.connected
+      ? await disconnectPlant(plant.id)
+      : await connectPlant(plant.id);
 
     if (result.success && result.plant) {
-      if (wasConnected) {
-        forgetRuntimeSession(result.plant.id);
+      if (!wasConnected) {
+        telemetryManager.preparePlantSessionStart(result.plant);
+        chartScaleStatesByPlant = resetPlantZoomState(chartScaleStatesByPlant, result.plant.id);
       } else {
-        forgetRuntimeSession(result.plant.id);
-        resetPlantTelemetryState(result.plant);
-        resetPlantZoomState(result.plant.id);
+        telemetryManager.forgetRuntimeSession(result.plant.id);
       }
 
       appStore.upsertPlant(result.plant);
     } else {
-      showFeedbackModal({
-        type: 'error',
-        title: activePlant.connected ? 'Falha ao desligar planta' : 'Falha ao iniciar planta',
-        message: result.error || 'Erro ao atualizar driver da planta',
-      });
+      showActionFailure(
+        plant.connected ? 'Falha ao desligar planta' : 'Falha ao iniciar planta',
+        result.error,
+        'Erro ao atualizar driver da planta',
+      );
     }
+
     plantActionLoading = null;
   }
 
   async function handleTogglePause() {
-    if (!activePlant) return;
-    const wasPaused = activePlant.paused;
+    const plant = getActivePlant();
+    if (!plant) return;
+
+    const wasPaused = plant.paused;
     plantActionLoading = 'pause';
-    const result = activePlant.paused
-      ? await resumePlant(activePlant.id)
-      : await pausePlant(activePlant.id);
+    const result = plant.paused
+      ? await resumePlant(plant.id)
+      : await pausePlant(plant.id);
 
     if (result.success && result.plant) {
       appStore.upsertPlant(result.plant);
       if (wasPaused) {
-        flushTelemetryBacklog(result.plant.id, result.plant);
+        telemetryManager.flushTelemetryBacklog(result.plant.id, result.plant);
       }
     } else {
-      showFeedbackModal({
-        type: 'error',
-        title: activePlant.paused ? 'Falha ao retomar planta' : 'Falha ao pausar planta',
-        message: result.error || 'Erro ao atualizar pausa da planta',
-      });
+      showActionFailure(
+        plant.paused ? 'Falha ao retomar planta' : 'Falha ao pausar planta',
+        result.error,
+        'Erro ao atualizar pausa da planta',
+      );
     }
+
     plantActionLoading = null;
   }
 
@@ -884,7 +588,7 @@
   }
 
   function resetZoom() {
-    resetScaleStatesForPlant(activePlantId);
+    chartScaleStatesByPlant = resetScaleStatesForPlant(chartScaleStatesByPlant, activePlantId);
   }
 
   function setXAxisMode(mode: XAxisMode) {
@@ -892,7 +596,7 @@
       return;
     }
 
-    updateScaleState(activePlantId, contextSensor.index, (state) => ({
+    chartScaleStatesByPlant = updateScaleStateMap(chartScaleStatesByPlant, activePlantId, contextSensor.index, (state) => ({
       ...state,
       xMode: mode,
       xMin: mode === 'manual' ? state.xMin : null,
@@ -916,14 +620,10 @@
       target = target.parentElement;
     }
 
-    const bounds = graphContainerRef.getBoundingClientRect();
-    const menuWidth = 250;
-    const menuHeight = 360;
-    let x = e.clientX - bounds.left;
-    let y = e.clientY - bounds.top;
-    if (x + menuWidth > bounds.width) x -= menuWidth;
-    if (y + menuHeight > bounds.height) y -= menuHeight;
-    contextMenu = { visible: true, x, y };
+    const nextPosition = resolveContextMenuPosition(graphContainerRef, e);
+    if (!nextPosition) return;
+
+    contextMenu = { visible: true, x: nextPosition.x, y: nextPosition.y };
   }
 
   function closeContextMenu() {
@@ -990,11 +690,12 @@
   }
 
   async function deleteController(controllerId: string) {
-    if (!activePlant) return;
+    const plant = getActivePlant();
+    if (!plant) return;
 
-    if (activePlant.source === 'backend') {
+    if (plant.source === 'backend') {
       const response = await removeController({
-        plantId: activePlant.id,
+        plantId: plant.id,
         controllerId,
       });
 
@@ -1003,26 +704,42 @@
         return;
       }
 
-      showFeedbackModal({
-        type: 'error',
-        title: 'Falha ao remover controlador',
-        message: response.error ?? 'Não foi possível remover o controlador da planta.',
-      });
+      showActionFailure(
+        'Falha ao remover controlador',
+        response.error,
+        'Não foi possível remover o controlador da planta.',
+      );
       return;
     }
 
-    appStore.deleteController(activePlant.id, controllerId);
+    appStore.deleteController(plant.id, controllerId);
   }
 
-  function updateControllerMeta(controllerId: string, field: string, value: any) {
-    if (!activePlant) return;
-    appStore.updateControllerMeta(activePlant.id, controllerId, field, value);
+  function updateControllerMeta(controllerId: string, field: string, value: unknown) {
+    const plant = getActivePlant();
+    if (!plant || !isEditableControllerField(field)) return;
+
+    if (field === 'name' && typeof value === 'string') {
+      appStore.updateControllerMeta(plant.id, controllerId, field, value);
+      return;
+    }
+
+    if (field === 'active' && typeof value === 'boolean') {
+      appStore.updateControllerMeta(plant.id, controllerId, field, value);
+      return;
+    }
+
+    if (
+      (field === 'inputVariableIds' || field === 'outputVariableIds') &&
+      Array.isArray(value) &&
+      value.every((item) => typeof item === 'string')
+    ) {
+      appStore.updateControllerMeta(plant.id, controllerId, field, value);
+    }
   }
 
   function openControllerBindingsEditor(controllerId: string) {
-    if (!activePlant) return;
-
-    const controller = activePlant.controllers.find((entry: Controller) => entry.id === controllerId);
+    const controller = findActiveController(controllerId);
     if (!controller) return;
 
     controllerToEditBindings = controller;
@@ -1030,9 +747,10 @@
   }
 
   function toggleControllerActive(controllerId: string, nextActive: boolean) {
-    if (!activePlant) return;
+    const plant = getActivePlant();
+    if (!plant) return;
 
-    const controller = activePlant.controllers.find((entry: Controller) => entry.id === controllerId);
+    const controller = plant.controllers.find((entry: Controller) => entry.id === controllerId);
     if (!controller) return;
 
     if (nextActive) {
@@ -1041,8 +759,8 @@
           ...controller,
           active: true,
         },
-        activePlant.controllers,
-        activePlant.variables
+        plant.controllers,
+        plant.variables
       );
 
       if (conflict) {
@@ -1055,16 +773,17 @@
       }
     }
 
-    appStore.updateControllerMeta(activePlant.id, controllerId, 'active', nextActive);
+    appStore.updateControllerMeta(plant.id, controllerId, 'active', nextActive);
   }
 
   function updateControllerBindings(
     controllerId: string,
     bindings: { inputVariableIds: string[]; outputVariableIds: string[] }
   ): string | null {
-    if (!activePlant) return 'Planta ativa não encontrada';
+    const plant = getActivePlant();
+    if (!plant) return 'Planta ativa não encontrada';
 
-    const controller = activePlant.controllers.find((entry: Controller) => entry.id === controllerId);
+    const controller = plant.controllers.find((entry: Controller) => entry.id === controllerId);
     if (!controller) return 'Controlador não encontrado';
 
     const nextController: Controller = {
@@ -1074,36 +793,42 @@
     };
 
     if (controller.active) {
-      const conflict = getControllerActivationConflict(nextController, activePlant.controllers, activePlant.variables);
+      const conflict = getControllerActivationConflict(
+        nextController,
+        plant.controllers,
+        plant.variables,
+      );
       if (conflict) {
         return conflict;
       }
     }
 
-    appStore.updateControllerMeta(activePlant.id, controllerId, 'inputVariableIds', bindings.inputVariableIds);
-    appStore.updateControllerMeta(activePlant.id, controllerId, 'outputVariableIds', bindings.outputVariableIds);
+    appStore.updateControllerMeta(plant.id, controllerId, 'inputVariableIds', bindings.inputVariableIds);
+    appStore.updateControllerMeta(plant.id, controllerId, 'outputVariableIds', bindings.outputVariableIds);
     return null;
   }
 
   function updateControllerParam(controllerId: string, paramKey: string, value: any) {
-    if (!activePlant) return;
-    appStore.updateControllerParam(activePlant.id, controllerId, paramKey, value);
+    const plant = getActivePlant();
+    if (!plant) return;
+    appStore.updateControllerParam(plant.id, controllerId, paramKey, value);
   }
 
   async function handleSaveControllerConfig(controllerId: string) {
-    if (!activePlant) {
+    const plant = getActivePlant();
+    if (!plant) {
       return { success: false, error: 'Planta ativa nao encontrada' };
     }
 
-    const controller = activePlant.controllers.find((entry: Controller) => entry.id === controllerId);
+    const controller = plant.controllers.find((entry: Controller) => entry.id === controllerId);
     if (!controller) {
       return { success: false, error: 'Controlador nao encontrado' };
     }
 
     const response = await saveController({
-      plantId: activePlant.id,
+      plantId: plant.id,
       controller,
-      source: activePlant.source,
+      source: plant.source,
     });
 
     if (response.success && response.plant) {
@@ -1137,44 +862,45 @@
 
     const disconnectResult = await disconnectPlant(plantId);
     if (!disconnectResult.success || !disconnectResult.plant) {
-      showFeedbackModal({
-        type: 'error',
-        title: 'Falha ao desligar planta',
-        message: disconnectResult.error || 'Não foi possível desligar a planta para aplicar o controlador.',
-      });
+      showActionFailure(
+        'Falha ao desligar planta',
+        disconnectResult.error,
+        'Não foi possível desligar a planta para aplicar o controlador.',
+      );
       plantActionLoading = null;
       return;
     }
 
-    forgetRuntimeSession(plantId);
+    telemetryManager.forgetRuntimeSession(plantId);
     appStore.upsertPlant(disconnectResult.plant);
 
     const connectResult = await connectPlant(plantId);
     if (connectResult.success && connectResult.plant) {
-      forgetRuntimeSession(connectResult.plant.id);
-      resetPlantTelemetryState(connectResult.plant);
-      resetPlantZoomState(connectResult.plant.id);
+      telemetryManager.preparePlantSessionStart(connectResult.plant);
+      chartScaleStatesByPlant = resetPlantZoomState(chartScaleStatesByPlant, connectResult.plant.id);
       appStore.upsertPlant(connectResult.plant);
     } else {
-      showFeedbackModal({
-        type: 'error',
-        title: 'Falha ao religar planta',
-        message: connectResult.error || 'Não foi possível religar a planta para aplicar o controlador.',
-      });
+      showActionFailure(
+        'Falha ao religar planta',
+        connectResult.error,
+        'Não foi possível religar a planta para aplicar o controlador.',
+      );
     }
 
     plantActionLoading = null;
   }
 
   async function updateSetpoint(varIndex: number, value: number) {
-    if (!activePlant) return;
-    appStore.updateVariableSetpoint(activePlant.id, varIndex, value);
+    const plant = getActivePlant();
+    if (!plant) return;
 
-    const variable = activePlant.variables[varIndex];
-    if (!variable || activePlant.source !== 'backend') return;
+    appStore.updateVariableSetpoint(plant.id, varIndex, value);
+
+    const variable = plant.variables[varIndex];
+    if (!variable || plant.source !== 'backend') return;
 
     const response = await saveSetpoint({
-      plantId: activePlant.id,
+      plantId: plant.id,
       variableId: variable.id,
       setpoint: value,
     });
@@ -1184,11 +910,11 @@
       return;
     }
 
-    showFeedbackModal({
-      type: 'error',
-      title: 'Falha ao salvar setpoint',
-      message: response.error ?? 'Não foi possível sincronizar o setpoint com o backend.',
-    });
+    showActionFailure(
+      'Falha ao salvar setpoint',
+      response.error,
+      'Não foi possível sincronizar o setpoint com o backend.',
+    );
   }
 
   function handleKeyDown(event: KeyboardEvent) {
@@ -1238,42 +964,11 @@
   });
 
   const chartConfigsByVariableIndex = $derived.by<Record<number, { pvConfig: ChartConfig; mvConfig: ChartConfig }>>(() => {
-    const configs: Record<number, { pvConfig: ChartConfig; mvConfig: ChartConfig }> = {};
-
-    for (const sensorEntry of sensorVariables) {
-      const scaleState = activeChartScaleStates[sensorEntry.index] ?? defaultChartScaleState();
-
-      configs[sensorEntry.index] = {
-        pvConfig: {
-          yMin: scaleState.yMin,
-          yMax: scaleState.yMax,
-          yMode: scaleState.yMode,
-          xMode: scaleState.xMode,
-          windowSize: scaleState.windowSize,
-          xMin: scaleState.xMin,
-          xMax: scaleState.xMax,
-          showGrid: true,
-          showHover: true,
-        },
-        mvConfig: {
-          yMin: 0,
-          yMax: 100,
-          yMode: 'manual',
-          xMode: scaleState.xMode,
-          windowSize: scaleState.windowSize,
-          xMin: scaleState.xMin,
-          xMax: scaleState.xMax,
-          showGrid: true,
-          showHover: true,
-        },
-      };
-    }
-
-    return configs;
+    return buildChartConfigsByVariableIndex(sensorVariables, activeChartScaleStates);
   });
 
   function handleRangeChange(variableIndex: number, xMin: number, xMax: number) {
-    updateScaleState(activePlantId, variableIndex, (state) => ({
+    chartScaleStatesByPlant = updateScaleStateMap(chartScaleStatesByPlant, activePlantId, variableIndex, (state) => ({
       ...state,
       xMode: 'manual',
       xMin: Math.min(xMin, xMax),
@@ -1285,7 +980,7 @@
     variableIndex: number,
     viewport: { xMin: number; xMax: number; yMin: number; yMax: number },
   ) {
-    updateScaleState(activePlantId, variableIndex, (state) => ({
+    chartScaleStatesByPlant = updateScaleStateMap(chartScaleStatesByPlant, activePlantId, variableIndex, (state) => ({
       ...state,
       xMode: 'manual',
       xMin: Math.min(viewport.xMin, viewport.xMax),
@@ -1294,29 +989,6 @@
       yMin: Math.min(viewport.yMin, viewport.yMax),
       yMax: Math.max(viewport.yMin, viewport.yMax),
     }));
-  }
-
-  function hasDraggedFiles(event: DragEvent): boolean {
-    const transfer = event.dataTransfer;
-    if (!transfer) return false;
-
-    if ((transfer.files?.length ?? 0) > 0) {
-      return true;
-    }
-
-    for (let index = 0; index < transfer.types.length; index += 1) {
-      if (transfer.types[index] === 'Files') {
-        return true;
-      }
-    }
-
-    for (let index = 0; index < transfer.items.length; index += 1) {
-      if (transfer.items[index]?.kind === 'file') {
-        return true;
-      }
-    }
-
-    return false;
   }
 
   function handleDragEnter(event: DragEvent) {
@@ -1352,7 +1024,7 @@
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
 
-    if (file.name.trim().toLowerCase() !== 'registry.json') {
+    if (!isRegistryJsonFile(file)) {
       showFeedbackModal({
         type: 'warning',
         title: 'Arquivo inválido',
@@ -1363,17 +1035,7 @@
 
     openPlantLoading = true;
     try {
-      const droppedPath = typeof (file as File & { path?: string }).path === 'string'
-        ? (file as File & { path?: string }).path
-        : '';
-
-      if (!droppedPath) {
-        throw new Error('Não foi possível resolver o caminho do registry.json selecionado.');
-      }
-
-      const { warning } = applyOpenedPlantResult(
-        await openPlantFilePath(droppedPath, file.name),
-      );
+      const { warning } = await openDroppedRegistryFile(file);
       if (warning) {
         showFeedbackModal({
           type: 'error',

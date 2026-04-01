@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import VariableCard from './VariableCard.svelte';
   import type { PlantVariable, PlantDataPoint, VariableStats } from '$lib/types/plant';
   import type { ChartConfig, ViewMode } from '$lib/types/chart';
@@ -66,6 +67,7 @@
     onRangeChange,
     onViewportChange,
   }: Props = $props();
+  let liveStatsTick = $state(0);
 
   const sensorEntries = $derived.by<SensorEntry[]>(() => {
     const entries: SensorEntry[] = [];
@@ -133,6 +135,16 @@
     return variableColors[index % variableColors.length];
   }
 
+  onMount(() => {
+    const timer = window.setInterval(() => {
+      liveStatsTick += 1;
+    }, 75);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  });
+
 </script>
 
 <div
@@ -160,6 +172,7 @@
         colors={getColorSet(sensorEntry.sensorIndex)}
         {lineStyles}
         stats={variableStats[sensorEntry.originalIndex]}
+        liveTick={liveStatsTick}
         onRangeChange={onRangeChange
           ? (xMin: number, xMax: number) => onRangeChange(sensorEntry.originalIndex, xMin, xMax)
           : undefined}

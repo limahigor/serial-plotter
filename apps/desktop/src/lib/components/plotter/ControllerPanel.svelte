@@ -2,6 +2,7 @@
   import { ChevronsRight, LoaderCircle, Pencil, Save, Trash2, ChevronDown, ChevronUp } from 'lucide-svelte';
   import SimpleToggle from '../ui/SimpleToggle.svelte';
   import DynamicParamInput from '../ui/DynamicParamInput.svelte';
+  import DraftNumberInput from '../ui/DraftNumberInput.svelte';
   import type { Plant } from '$lib/types/plant';
   import type { Controller, ControllerParam } from '$lib/types/controller';
 
@@ -232,14 +233,12 @@
                   </span>
                 </div>
                 <div class="flex items-center gap-1">
-                  <input
-                    type="number"
+                  <DraftNumberInput
                     value={variable.setpoint}
                     min={variable.pvMin}
                     max={variable.pvMax}
-                    step="0.1"
-                    onchange={(e: Event) => onUpdateSetpoint(index, Number((e.target as HTMLInputElement).value))}
-                    class="w-20 px-2 py-1 text-sm font-mono font-bold text-right text-blue-600 dark:text-blue-400 bg-transparent border border-slate-200 dark:border-white/10 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                    inputClass="w-20 px-2 py-1 text-sm font-mono font-bold text-right text-blue-600 dark:text-blue-400 bg-transparent border border-slate-200 dark:border-white/10 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                    onCommit={(nextValue) => onUpdateSetpoint(index, nextValue)}
                   />
                   <span class="text-[10px] text-slate-400 dark:text-zinc-500 w-6">
                     {variable.unit}
