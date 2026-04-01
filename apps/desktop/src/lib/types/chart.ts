@@ -38,7 +38,7 @@ export interface VariableVisibility {
   mv: boolean;
 }
 
-export interface ChartStateType {
+export interface ChartScaleState {
   xMode: XAxisMode;
   yMode: YAxisMode;
   xMin: number | null;
@@ -46,10 +46,16 @@ export interface ChartStateType {
   yMin: number;
   yMax: number;
   windowSize: number;
-  visible: VariableVisibility;
+}
+
+export interface ChartViewState {
   viewMode: ViewMode;
   focusedVariableIndex: number;
   variableCount: number;
+}
+
+export interface ChartStateType extends ChartScaleState, ChartViewState {
+  visible: VariableVisibility;
 }
 
 export function defaultChartState(variableCount: number = 1): ChartStateType {
@@ -68,7 +74,27 @@ export function defaultChartState(variableCount: number = 1): ChartStateType {
   };
 }
 
-export function nextViewState(state: ChartStateType): void {
+export function defaultChartScaleState(): ChartScaleState {
+  return {
+    xMode: 'auto',
+    yMode: 'auto',
+    xMin: null,
+    xMax: null,
+    yMin: 0,
+    yMax: 100,
+    windowSize: 30,
+  };
+}
+
+export function defaultChartViewState(variableCount: number = 1): ChartViewState {
+  return {
+    viewMode: 'grid',
+    focusedVariableIndex: 0,
+    variableCount,
+  };
+}
+
+export function nextViewState(state: ChartViewState): void {
   if (state.viewMode === 'grid') {
     state.viewMode = 'single';
     state.focusedVariableIndex = 0;
@@ -83,7 +109,7 @@ export function nextViewState(state: ChartStateType): void {
   }
 }
 
-export function resetToGridView(state: ChartStateType): void {
+export function resetToGridView(state: ChartViewState): void {
   state.viewMode = 'grid';
   state.focusedVariableIndex = 0;
 }

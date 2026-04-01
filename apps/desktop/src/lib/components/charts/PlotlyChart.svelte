@@ -11,9 +11,20 @@
     showYAxis?: boolean;
     xAxisMode?: 'full' | 'grid-only' | 'hidden';
     onRangeChange?: (xMin: number, xMax: number) => void;
+    onViewportChange?: (viewport: { xMin: number; xMax: number; yMin: number; yMax: number }) => void;
+    interactiveYAxis?: boolean;
   }
 
-  let { series, config, theme, showYAxis = true, xAxisMode = 'full', onRangeChange }: Props = $props();
+  let {
+    series,
+    config,
+    theme,
+    showYAxis = true,
+    xAxisMode = 'full',
+    onRangeChange,
+    onViewportChange,
+    interactiveYAxis = false,
+  }: Props = $props();
 
   let wrapper: HTMLDivElement;
   let chart: uPlot | null = null;
@@ -24,14 +35,22 @@
   let _pointerInside = false;
   let _pendingDeferredUpdate = false;
   let _localManualRange: { min: number; max: number } | null = null;
+  let _localManualYRange: { min: number; max: number } | null = null;
   let _lastResolvedXMode: 'auto' | 'sliding' | 'manual' = 'auto';
+  let _lastResolvedYMode: 'auto' | 'manual' = 'auto';
   let _panStartX = 0;
+  let _panStartY = 0;
   let _panScaleMin = 0;
   let _panScaleMax = 0;
+  let _panScaleYMin = 0;
+  let _panScaleYMax = 0;
   let tooltipEl: HTMLDivElement;
   const MAX_RENDER_POINTS = 2400;
   let rangeChangeRaf: number | null = null;
   let pendingRangeChange: { xMin: number; xMax: number } | null = null;
+  let pendingViewportChange:
+    | { xMin: number; xMax: number; yMin: number; yMax: number }
+    | null = null;
   let lastAppliedXRange: { min: number; max: number } | null = null;
   let lastAppliedYRange: { min: number; max: number } | null = null;
   let lastLayoutMode = 'regular';
@@ -48,14 +67,15 @@
 
   function syncScaleRef() {
     const localRange = _localManualRange;
+    const localYRange = _localManualYRange;
 
     _scaleRef.xMode = localRange ? 'manual' : config.xMode;
     _scaleRef.xMin = localRange?.min ?? config.xMin ?? null;
     _scaleRef.xMax = localRange?.max ?? config.xMax ?? null;
     _scaleRef.windowSize = config.windowSize;
-    _scaleRef.yMode = config.yMode;
-    _scaleRef.yMin = config.yMin;
-    _scaleRef.yMax = config.yMax;
+    _scaleRef.yMode = localYRange ? 'manual' : config.yMode;
+    _scaleRef.yMin = localYRange?.min ?? config.yMin;
+    _scaleRef.yMax = localYRange?.max ?? config.yMax;
   }
 
   const colors = $derived({
@@ -96,8 +116,6 @@
   );
 
   function queueRangeChange(xMin: number, xMax: number) {
-    if (!onRangeChange) return;
-
     const nextMin = Math.min(xMin, xMax);
     const nextMax = Math.max(xMin, xMax);
     if (!Number.isFinite(nextMin) || !Number.isFinite(nextMax) || nextMax - nextMin <= 0.0001) {
@@ -105,6 +123,7 @@
     }
 
     pendingRangeChange = { xMin: nextMin, xMax: nextMax };
+    pendingViewportChange = null;
     if (rangeChangeRaf !== null) {
       return;
     }
@@ -116,6 +135,58 @@
       if (nextRange) {
         onRangeChange?.(nextRange.xMin, nextRange.xMax);
       }
+    });
+  }
+
+  function queueViewportChange(xMin: number, xMax: number, yMin: number, yMax: number) {
+    if (!onViewportChange) {
+      queueRangeChange(xMin, xMax);
+      return;
+    }
+
+    const nextXMin = Math.min(xMin, xMax);
+    const nextXMax = Math.max(xMin, xMax);
+    const nextYMin = Math.min(yMin, yMax);
+    const nextYMax = Math.max(yMin, yMax);
+
+    if (
+      !Number.isFinite(nextXMin) ||
+      !Number.isFinite(nextXMax) ||
+      nextXMax - nextXMin <= 0.0001 ||
+      !Number.isFinite(nextYMin) ||
+      !Number.isFinite(nextYMax) ||
+      nextYMax - nextYMin <= 0.0001
+    ) {
+      return;
+    }
+
+    pendingRangeChange = {
+      xMin: nextXMin,
+      xMax: nextXMax,
+    };
+    pendingViewportChange = {
+      xMin: nextXMin,
+      xMax: nextXMax,
+      yMin: nextYMin,
+      yMax: nextYMax,
+    };
+
+    if (rangeChangeRaf !== null) {
+      return;
+    }
+
+    rangeChangeRaf = requestAnimationFrame(() => {
+      rangeChangeRaf = null;
+      const nextRange = pendingRangeChange;
+      const nextViewport = pendingViewportChange;
+      pendingRangeChange = null;
+      pendingViewportChange = null;
+      if (!nextRange || !nextViewport) {
+        return;
+      }
+
+      onRangeChange?.(nextRange.xMin, nextRange.xMax);
+      onViewportChange?.(nextViewport);
     });
   }
 
@@ -156,31 +227,6 @@
   function buildRenderIndices(source: typeof series[number]['data']): number[] {
     if (source.length === 0) {
       return [];
-    }
-
-    if (_scaleRef.xMode === 'manual') {
-      const count = source.length;
-
-      if (count <= MAX_RENDER_POINTS) {
-        const indices = new Array<number>(count);
-        for (let index = 0; index < count; index += 1) {
-          indices[index] = index;
-        }
-        return indices;
-      }
-
-      const step = Math.max(1, Math.floor(count / (MAX_RENDER_POINTS - 1)));
-      const indices: number[] = [];
-
-      for (let index = 0; index < count; index += step) {
-        indices.push(index);
-      }
-
-      if (indices[indices.length - 1] !== count - 1) {
-        indices.push(count - 1);
-      }
-
-      return indices;
     }
 
     const firstTime = source[0].time;
@@ -288,22 +334,12 @@
     };
   }
 
-  function padManualYRange(min: number, max: number): { min: number; max: number } {
-    const lower = Math.min(min, max);
-    const upper = Math.max(min, max);
-    const span = Math.max(upper - lower, 1);
-    const topPad = Math.max(span * 0.04, 1);
-    const bottomPad = lower === 0 ? 0 : Math.max(span * 0.02, 0.5);
-
-    return {
-      min: lower - bottomPad,
-      max: upper + topPad,
-    };
-  }
-
   function resolveYRange(data: uPlot.AlignedData): { min: number; max: number } | null {
     if (_scaleRef.yMode === 'manual') {
-      return padManualYRange(_scaleRef.yMin, _scaleRef.yMax);
+      return {
+        min: Math.min(_scaleRef.yMin, _scaleRef.yMax),
+        max: Math.max(_scaleRef.yMin, _scaleRef.yMax),
+      };
     }
 
     let dataMin = Number.POSITIVE_INFINITY;
@@ -377,8 +413,53 @@
     }
   }
 
+  function setLocalManualYRange(yMin: number, yMax: number, syncChart = true) {
+    const nextMin = Math.min(yMin, yMax);
+    const nextMax = Math.max(yMin, yMax);
+
+    if (!Number.isFinite(nextMin) || !Number.isFinite(nextMax) || nextMax - nextMin <= 0.0001) {
+      return;
+    }
+
+    _localManualYRange = { min: nextMin, max: nextMax };
+    syncScaleRef();
+
+    if (syncChart && chart) {
+      const range = { min: nextMin, max: nextMax };
+      chart.setScale('y', range);
+      lastAppliedYRange = range;
+    }
+  }
+
+  function applyInteractiveViewport(
+    xMin: number,
+    xMax: number,
+    yMin?: number,
+    yMax?: number,
+  ) {
+    setLocalManualRange(xMin, xMax, false);
+    if (interactiveYAxis && yMin != null && yMax != null) {
+      setLocalManualYRange(yMin, yMax, false);
+    }
+
+    if (!chart) {
+      return;
+    }
+
+    const data = buildData();
+    chart.setData(data, false);
+    applyResolvedScales(data);
+    prevDataSignature = getDataSignature();
+    _pendingDeferredUpdate = false;
+  }
+
   function clearLocalManualRange() {
     _localManualRange = null;
+    syncScaleRef();
+  }
+
+  function clearLocalManualYRange() {
+    _localManualYRange = null;
     syncScaleRef();
   }
 
@@ -451,7 +532,7 @@
       padding: [topPad, rightPad, bottomPad, 0],
       cursor: {
         show: config.showHover !== false,
-        drag: { x: true, y: false, setScale: false },
+        drag: { x: true, y: interactiveYAxis, setScale: false },
       },
       legend: { show: false },
       scales: {
@@ -473,8 +554,10 @@
           auto: true,
           range: (_u: uPlot, dataMin: number, dataMax: number): [number, number] => {
             if (_scaleRef.yMode === 'manual') {
-              const padded = padManualYRange(_scaleRef.yMin, _scaleRef.yMax);
-              return [padded.min, padded.max];
+              return [
+                Math.min(_scaleRef.yMin, _scaleRef.yMax),
+                Math.max(_scaleRef.yMin, _scaleRef.yMax),
+              ];
             }
             const pad = (dataMax - dataMin) * 0.05 || 1;
             return [dataMin - pad, dataMax + pad];
@@ -510,8 +593,15 @@
             if (sel.width > 2) {
               const xMin = u.posToVal(sel.left, 'x');
               const xMax = u.posToVal(sel.left + sel.width, 'x');
-              setLocalManualRange(xMin, xMax);
-              queueRangeChange(xMin, xMax);
+              if (interactiveYAxis && sel.height > 2) {
+                const yFrom = u.posToVal(sel.top, 'y');
+                const yTo = u.posToVal(sel.top + sel.height, 'y');
+                applyInteractiveViewport(xMin, xMax, yFrom, yTo);
+                queueViewportChange(xMin, xMax, yFrom, yTo);
+              } else {
+                applyInteractiveViewport(xMin, xMax);
+                queueRangeChange(xMin, xMax);
+              }
             }
             u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
           },
@@ -601,7 +691,24 @@
       }
       nMin = Math.max(0, nMin);
     }
-    setLocalManualRange(nMin, nMax);
+
+    if (interactiveYAxis) {
+      const cursorY = e.clientY - rect.top;
+      const yMin = chart.scales.y.min ?? 0;
+      const yMax = chart.scales.y.max ?? 1;
+      const yRange = yMax - yMin;
+      const yRatio = Math.max(0, Math.min(1, (rect.height - cursorY) / rect.height));
+      const centerY = yMin + yRange * yRatio;
+      const newYRange = yRange * factor;
+      const nextYMin = centerY - newYRange * yRatio;
+      const nextYMax = centerY + newYRange * (1 - yRatio);
+
+      applyInteractiveViewport(nMin, nMax, nextYMin, nextYMax);
+      queueViewportChange(nMin, nMax, nextYMin, nextYMax);
+      return;
+    }
+
+    applyInteractiveViewport(nMin, nMax);
     queueRangeChange(nMin, nMax);
   }
 
@@ -611,8 +718,11 @@
       e.preventDefault();
       _panning = true;
       _panStartX = e.clientX;
+      _panStartY = e.clientY;
       _panScaleMin = chart.scales.x.min ?? 0;
       _panScaleMax = chart.scales.x.max ?? 1;
+      _panScaleYMin = chart.scales.y.min ?? 0;
+      _panScaleYMax = chart.scales.y.max ?? 1;
       wrapper.setPointerCapture(e.pointerId);
       wrapper.style.cursor = 'grabbing';
     }
@@ -640,7 +750,21 @@
       }
       nMin = Math.max(0, nMin);
     }
-    setLocalManualRange(nMin, nMax);
+
+    if (interactiveYAxis) {
+      const pyRange = rect.height;
+      const scaleRangeY = _panScaleYMax - _panScaleYMin;
+      const dy = e.clientY - _panStartY;
+      const dtY = (dy / pyRange) * scaleRangeY;
+      const nextYMin = _panScaleYMin + dtY;
+      const nextYMax = _panScaleYMax + dtY;
+
+      applyInteractiveViewport(nMin, nMax, nextYMin, nextYMax);
+      queueViewportChange(nMin, nMax, nextYMin, nextYMax);
+      return;
+    }
+
+    applyInteractiveViewport(nMin, nMax);
     queueRangeChange(nMin, nMax);
   }
 
@@ -693,6 +817,7 @@
     prevDataSignature = getDataSignature();
     _pendingDeferredUpdate = false;
     _lastResolvedXMode = _scaleRef.xMode as 'auto' | 'sliding' | 'manual';
+    _lastResolvedYMode = _scaleRef.yMode as 'auto' | 'manual';
   }
 
 
@@ -812,6 +937,33 @@
     const _ = [config.yMin, config.yMax];
     untrack(() => {
       if (_mounted && chart) updateChart();
+    });
+  });
+
+  $effect(() => {
+    const _ = [config.yMode, config.yMin, config.yMax];
+    untrack(() => {
+      if (!_mounted || !chart) return;
+
+      if (config.yMode !== 'manual') {
+        clearLocalManualYRange();
+      } else {
+        setLocalManualYRange(config.yMin, config.yMax, false);
+      }
+
+      syncScaleRef();
+      const resolvedMode = _scaleRef.yMode as 'auto' | 'manual';
+      const modeChanged = resolvedMode !== _lastResolvedYMode;
+      _lastResolvedYMode = resolvedMode;
+
+      if (modeChanged) {
+        updateChart();
+        return;
+      }
+
+      const data = (chart.data ?? buildData()) as uPlot.AlignedData;
+      applyResolvedScales(data);
+      prevDataSignature = getDataSignature();
     });
   });
 

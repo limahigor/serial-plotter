@@ -29,6 +29,7 @@
     showLegend?: boolean;
     stats?: VariableStats;
     onRangeChange?: (xMin: number, xMax: number) => void;
+    onViewportChange?: (viewport: { xMin: number; xMax: number; yMin: number; yMax: number }) => void;
   }
 
   let {
@@ -48,6 +49,7 @@
     showLegend = true,
     stats,
     onRangeChange,
+    onViewportChange,
   }: Props = $props();
 
   type CardLayoutMode = 'regular' | 'compact' | 'tight' | 'collapsed';
@@ -337,7 +339,8 @@
         config={pvConfig}
         {theme}
         xAxisMode={sensorXAxisMode}
-        {onRangeChange}
+        {onViewportChange}
+        interactiveYAxis={true}
       />
     </div>
     {#if showActuatorChart}

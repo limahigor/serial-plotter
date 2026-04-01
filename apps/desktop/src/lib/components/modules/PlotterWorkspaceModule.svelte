@@ -30,7 +30,16 @@
   import type { Plant, PlantVariable } from '$lib/types/plant';
   import { buildPlantSeriesCatalog, type Controller } from '$lib/types/plant';
   import type { PluginDefinition, PluginInstance } from '$lib/types/plugin';
-  import { type ChartStateType, type XAxisMode, defaultChartState, nextViewState, resetToGridView } from '$lib/types/chart';
+  import {
+    type ChartConfig,
+    type ChartScaleState,
+    type ChartViewState,
+    type XAxisMode,
+    defaultChartScaleState,
+    defaultChartViewState,
+    nextViewState,
+    resetToGridView,
+  } from '$lib/types/chart';
   import {
     closePlant,
     connectPlant,
@@ -71,38 +80,149 @@
     actuatorVariables: [],
   };
 
-  let chartStates: Record<string, ChartStateType> = $state({});
-  let manualRangesByPlant: Record<string, Record<number, { xMin: number; xMax: number }>> = $state({});
+  let chartViewStatesByPlant: Record<string, ChartViewState> = $state({});
+  let chartScaleStatesByPlant: Record<string, Record<number, ChartScaleState>> = $state({});
   const runtimeSessionByPlant = new Map<string, string>();
   const telemetryBacklogByPlant = new Map<string, { runtimeId: string; packets: ReturnType<typeof buildTelemetryPacketFromRuntimeEvent>[] }>();
   const liveTelemetryByPlant = new Map<string, { plant: Plant; packets: ReturnType<typeof buildTelemetryPacketFromRuntimeEvent>[]; latestStats: Plant['stats'] }>();
   let telemetryFlushFrame = 0;
 
-  function countSensors(variables: PlantVariable[]): number {
-    let count = 0;
-    for (const variable of variables) {
-      if (variable.type === 'sensor') count += 1;
+  function getSensorIndices(plant: Plant): number[] {
+    const sensorIndices: number[] = [];
+
+    for (const [index, variable] of plant.variables.entries()) {
+      if (variable.type === 'sensor') {
+        sensorIndices.push(index);
+      }
     }
-    return count;
+
+    return sensorIndices;
+  }
+
+  function buildSyncedChartViewState(
+    currentState: ChartViewState | undefined,
+    sensorCount: number,
+  ): ChartViewState | null {
+    if (!currentState) {
+      return defaultChartViewState(sensorCount);
+    }
+
+    const focusedVariableIndex = Math.max(
+      0,
+      Math.min(currentState.focusedVariableIndex, Math.max(sensorCount - 1, 0)),
+    );
+
+    if (
+      currentState.variableCount === sensorCount &&
+      currentState.focusedVariableIndex === focusedVariableIndex
+    ) {
+      return null;
+    }
+
+    return {
+      ...currentState,
+      variableCount: sensorCount,
+      focusedVariableIndex,
+    };
+  }
+
+  function buildSyncedChartScaleStates(
+    currentStates: Record<number, ChartScaleState> | undefined,
+    sensorIndices: number[],
+  ): Record<number, ChartScaleState> | null {
+    const sensorIndexSet = new Set(sensorIndices);
+    const existingStates = currentStates ?? {};
+    const nextStates: Record<number, ChartScaleState> = {};
+    let changed = !currentStates;
+
+    for (const sensorIndex of sensorIndices) {
+      const currentState = existingStates[sensorIndex];
+      if (currentState) {
+        nextStates[sensorIndex] = currentState;
+      } else {
+        nextStates[sensorIndex] = defaultChartScaleState();
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      for (const key of Object.keys(existingStates)) {
+        if (!sensorIndexSet.has(Number(key))) {
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    return changed ? nextStates : null;
+  }
+
+  function pruneOrphanPlantStates<T>(
+    currentStates: Record<string, T>,
+    activePlantIds: Set<string>,
+  ): Record<string, T> | null {
+    for (const plantId of Object.keys(currentStates)) {
+      if (!activePlantIds.has(plantId)) {
+        const nextStates = { ...currentStates };
+
+        for (const orphanPlantId of Object.keys(nextStates)) {
+          if (!activePlantIds.has(orphanPlantId)) {
+            delete nextStates[orphanPlantId];
+          }
+        }
+
+        return nextStates;
+      }
+    }
+
+    return null;
   }
 
   $effect(() => {
+    const activePlantIds = new Set<string>(plants.map((plant: Plant) => plant.id));
+    let nextChartViewStates = chartViewStatesByPlant;
+    let nextChartScaleStates = chartScaleStatesByPlant;
+
     for (const plant of plants) {
-      const sensorCount = countSensors(plant.variables);
-      if (!(plant.id in chartStates)) {
-        chartStates[plant.id] = defaultChartState(sensorCount);
-      } else if (chartStates[plant.id].variableCount !== sensorCount) {
-        chartStates[plant.id].variableCount = sensorCount;
+      const sensorIndices = getSensorIndices(plant);
+      const nextViewState = buildSyncedChartViewState(nextChartViewStates[plant.id], sensorIndices.length);
+      if (nextViewState) {
+        if (nextChartViewStates === chartViewStatesByPlant) {
+          nextChartViewStates = { ...chartViewStatesByPlant };
+        }
+        nextChartViewStates[plant.id] = nextViewState;
       }
 
-      if (!(plant.id in manualRangesByPlant)) {
-        manualRangesByPlant[plant.id] = {};
+      const nextScaleStates = buildSyncedChartScaleStates(nextChartScaleStates[plant.id], sensorIndices);
+      if (nextScaleStates) {
+        if (nextChartScaleStates === chartScaleStatesByPlant) {
+          nextChartScaleStates = { ...chartScaleStatesByPlant };
+        }
+        nextChartScaleStates[plant.id] = nextScaleStates;
       }
+    }
+
+    const prunedChartViewStates = pruneOrphanPlantStates(nextChartViewStates, activePlantIds);
+    if (prunedChartViewStates) {
+      nextChartViewStates = prunedChartViewStates;
+    }
+
+    const prunedChartScaleStates = pruneOrphanPlantStates(nextChartScaleStates, activePlantIds);
+    if (prunedChartScaleStates) {
+      nextChartScaleStates = prunedChartScaleStates;
+    }
+
+    if (nextChartViewStates !== chartViewStatesByPlant) {
+      chartViewStatesByPlant = nextChartViewStates;
+    }
+
+    if (nextChartScaleStates !== chartScaleStatesByPlant) {
+      chartScaleStatesByPlant = nextChartScaleStates;
     }
   });
 
-  const chartState = $derived(chartStates[activePlantId] ?? defaultChartState());
-  const activeManualRanges = $derived(manualRangesByPlant[activePlantId] ?? {});
+  const chartViewState = $derived(chartViewStatesByPlant[activePlantId] ?? defaultChartViewState());
+  const activeChartScaleStates = $derived(chartScaleStatesByPlant[activePlantId] ?? {});
   const plantsById = $derived.by<Map<string, Plant>>(
     () => new Map(plants.map((plant: Plant) => [plant.id, plant]))
   );
@@ -196,7 +316,7 @@
 
   const focusedSensor = $derived.by(() => {
     if (sensorVariables.length === 0) return null;
-    const safeIndex = Math.max(0, Math.min(chartState.focusedVariableIndex, sensorVariables.length - 1));
+    const safeIndex = Math.max(0, Math.min(chartViewState.focusedVariableIndex, sensorVariables.length - 1));
     return sensorVariables[safeIndex];
   });
 
@@ -204,6 +324,11 @@
     if (sensorVariables.length === 0) return null;
     const safeIndex = Math.max(0, Math.min(contextSensorIndex, sensorVariables.length - 1));
     return sensorVariables[safeIndex];
+  });
+
+  const contextChartScaleState = $derived.by<ChartScaleState>(() => {
+    if (!contextSensor) return defaultChartScaleState();
+    return activeChartScaleStates[contextSensor.index] ?? defaultChartScaleState();
   });
 
   $effect(() => {
@@ -366,17 +491,49 @@
     scheduleLiveTelemetryFlush();
   }
 
-  function resetPlantZoomState(plantId: string) {
-    manualRangesByPlant = {
-      ...manualRangesByPlant,
-      [plantId]: {},
+  function resetScaleStatesForPlant(plantId: string) {
+    const currentStates = chartScaleStatesByPlant[plantId] ?? {};
+    chartScaleStatesByPlant = {
+      ...chartScaleStatesByPlant,
+      [plantId]: Object.fromEntries(
+        Object.keys(currentStates).map((key) => [Number(key), defaultChartScaleState()]),
+      ),
     };
+  }
 
-    if (plantId === activePlantId) {
-      chartState.xMode = 'auto';
-      chartState.xMin = null;
-      chartState.xMax = null;
-    }
+  function updateScaleState(
+    plantId: string,
+    variableIndex: number,
+    updater: (current: ChartScaleState) => ChartScaleState,
+  ) {
+    const currentStates = chartScaleStatesByPlant[plantId] ?? {};
+    const currentState = currentStates[variableIndex] ?? defaultChartScaleState();
+
+    chartScaleStatesByPlant = {
+      ...chartScaleStatesByPlant,
+      [plantId]: {
+        ...currentStates,
+        [variableIndex]: updater(currentState),
+      },
+    };
+  }
+
+  function resetPlantZoomState(plantId: string) {
+    const currentStates = chartScaleStatesByPlant[plantId] ?? {};
+    chartScaleStatesByPlant = {
+      ...chartScaleStatesByPlant,
+      [plantId]: Object.fromEntries(
+        Object.entries(currentStates).map(([key, state]) => [
+          Number(key),
+          {
+            ...state,
+            xMode: 'auto',
+            xMin: null,
+            xMax: null,
+          },
+        ]),
+      ),
+    };
   }
 
   function showFeedbackModal(options: {
@@ -581,9 +738,12 @@
         appStore.removePlant(removeModal.plantId);
         clearPlant(removeModal.plantId);
         forgetRuntimeSession(removeModal.plantId);
-        const remainingRanges = { ...manualRangesByPlant };
-        delete remainingRanges[removeModal.plantId];
-        manualRangesByPlant = remainingRanges;
+        const remainingViewStates = { ...chartViewStatesByPlant };
+        const remainingScaleStates = { ...chartScaleStatesByPlant };
+        delete remainingViewStates[removeModal.plantId];
+        delete remainingScaleStates[removeModal.plantId];
+        chartViewStatesByPlant = remainingViewStates;
+        chartScaleStatesByPlant = remainingScaleStates;
       } else {
         showFeedbackModal({
           type: 'error',
@@ -710,31 +870,20 @@
   }
 
   function resetZoom() {
-    chartState.xMode = 'auto';
-    chartState.yMode = 'manual';
-    chartState.yMin = 0;
-    chartState.yMax = 100;
-    chartState.xMin = null;
-    chartState.xMax = null;
-    manualRangesByPlant = {
-      ...manualRangesByPlant,
-      [activePlantId]: {},
-    };
+    resetScaleStatesForPlant(activePlantId);
   }
 
   function setXAxisMode(mode: XAxisMode) {
-    chartState.xMode = mode;
-
-    if (mode === 'manual') {
+    if (!contextSensor) {
       return;
     }
 
-    chartState.xMin = null;
-    chartState.xMax = null;
-    manualRangesByPlant = {
-      ...manualRangesByPlant,
-      [activePlantId]: {},
-    };
+    updateScaleState(activePlantId, contextSensor.index, (state) => ({
+      ...state,
+      xMode: mode,
+      xMin: mode === 'manual' ? state.xMin : null,
+      xMax: mode === 'manual' ? state.xMax : null,
+    }));
   }
 
   let _displayTick = $state(0);
@@ -1033,7 +1182,7 @@
       return;
     }
     
-    const state = chartStates[activePlantId];
+    const state = chartViewStatesByPlant[activePlantId];
     if (!state) return;
     
     if (event.code === 'Space') {
@@ -1074,38 +1223,63 @@
     return activePlant.variables.map((_: unknown, idx: number) => getVariableStats(activePlantId, idx));
   });
 
-  const pvSpConfig = $derived({
-    yMin: chartState.yMin,
-    yMax: chartState.yMax,
-    yMode: chartState.yMode,
-    xMode: chartState.xMode,
-    windowSize: chartState.windowSize,
-    xMin: chartState.xMin,
-    xMax: chartState.xMax,
-    showGrid: true,
-    showHover: true
-  });
+  const chartConfigsByVariableIndex = $derived.by<Record<number, { pvConfig: ChartConfig; mvConfig: ChartConfig }>>(() => {
+    const configs: Record<number, { pvConfig: ChartConfig; mvConfig: ChartConfig }> = {};
 
-  const mvConfig = $derived({
-    yMin: 0,
-    yMax: 100,
-    yMode: 'manual' as const,
-    xMode: chartState.xMode,
-    windowSize: chartState.windowSize,
-    xMin: chartState.xMin,
-    xMax: chartState.xMax,
-    showGrid: true,
-    showHover: true
+    for (const sensorEntry of sensorVariables) {
+      const scaleState = activeChartScaleStates[sensorEntry.index] ?? defaultChartScaleState();
+
+      configs[sensorEntry.index] = {
+        pvConfig: {
+          yMin: scaleState.yMin,
+          yMax: scaleState.yMax,
+          yMode: scaleState.yMode,
+          xMode: scaleState.xMode,
+          windowSize: scaleState.windowSize,
+          xMin: scaleState.xMin,
+          xMax: scaleState.xMax,
+          showGrid: true,
+          showHover: true,
+        },
+        mvConfig: {
+          yMin: 0,
+          yMax: 100,
+          yMode: 'manual',
+          xMode: scaleState.xMode,
+          windowSize: scaleState.windowSize,
+          xMin: scaleState.xMin,
+          xMax: scaleState.xMax,
+          showGrid: true,
+          showHover: true,
+        },
+      };
+    }
+
+    return configs;
   });
 
   function handleRangeChange(variableIndex: number, xMin: number, xMax: number) {
-    manualRangesByPlant = {
-      ...manualRangesByPlant,
-      [activePlantId]: {
-        ...(manualRangesByPlant[activePlantId] ?? {}),
-        [variableIndex]: { xMin, xMax },
-      },
-    };
+    updateScaleState(activePlantId, variableIndex, (state) => ({
+      ...state,
+      xMode: 'manual',
+      xMin: Math.min(xMin, xMax),
+      xMax: Math.max(xMin, xMax),
+    }));
+  }
+
+  function handleViewportChange(
+    variableIndex: number,
+    viewport: { xMin: number; xMax: number; yMin: number; yMax: number },
+  ) {
+    updateScaleState(activePlantId, variableIndex, (state) => ({
+      ...state,
+      xMode: 'manual',
+      xMin: Math.min(viewport.xMin, viewport.xMax),
+      xMax: Math.max(viewport.xMin, viewport.xMax),
+      yMode: 'manual',
+      yMin: Math.min(viewport.yMin, viewport.yMax),
+      yMax: Math.max(viewport.yMin, viewport.yMax),
+    }));
   }
 
   function hasDraggedFiles(event: DragEvent): boolean {
@@ -1318,7 +1492,7 @@
           bind:visible={contextMenu.visible}
           x={contextMenu.x}
           y={contextMenu.y}
-          {chartState}
+          chartState={contextChartScaleState}
           onSetXAxisMode={setXAxisMode}
           seriesControls={contextSeriesControls}
           seriesTitle={contextSeriesTitle}
@@ -1331,15 +1505,14 @@
           <VariableGrid
             variables={activePlant.variables}
             data={plantData}
-            pvConfig={pvSpConfig}
-            {mvConfig}
+            {chartConfigsByVariableIndex}
             {theme}
-            viewMode={chartState.viewMode}
-            focusedIndex={chartState.focusedVariableIndex}
+            viewMode={chartViewState.viewMode}
+            focusedIndex={chartViewState.focusedVariableIndex}
             lineStyles={seriesStyles}
             variableStats={variableStatsArray}
-            xRangeByVariableIndex={activeManualRanges}
             onRangeChange={handleRangeChange}
+            onViewportChange={handleViewportChange}
           />
         {/if}
       </div>

@@ -1,21 +1,23 @@
 <script lang="ts">
   import VariableCard from './VariableCard.svelte';
   import type { PlantVariable, PlantDataPoint, VariableStats } from '$lib/types/plant';
-  import type { ChartConfig, ChartStateType, ViewMode } from '$lib/types/chart';
+  import type { ChartConfig, ViewMode } from '$lib/types/chart';
   import { getVariableKeys } from '$lib/types/plant';
 
   interface Props {
     variables: PlantVariable[];
     data: PlantDataPoint[];
-    pvConfig: ChartConfig;
-    mvConfig: ChartConfig;
+    chartConfigsByVariableIndex: Record<number, { pvConfig: ChartConfig; mvConfig: ChartConfig }>;
     theme: 'dark' | 'light';
     viewMode: ViewMode;
     focusedIndex: number;
     lineStyles?: Record<string, { color: string; visible: boolean; label?: string }>;
     variableStats?: VariableStats[];
-    xRangeByVariableIndex?: Record<number, { xMin: number; xMax: number }>;
     onRangeChange?: (variableIndex: number, xMin: number, xMax: number) => void;
+    onViewportChange?: (
+      variableIndex: number,
+      viewport: { xMin: number; xMax: number; yMin: number; yMax: number }
+    ) => void;
   }
 
   interface LinkedActuatorEntry {
@@ -35,19 +37,33 @@
   }
 
   const ACTUATOR_COLORS = ['#10b981', '#06b6d4', '#8b5cf6', '#f97316', '#ec4899', '#14b8a6'];
+  const FALLBACK_PV_CONFIG: ChartConfig = {
+    yMin: 0,
+    yMax: 100,
+    yMode: 'auto',
+    xMode: 'auto',
+    windowSize: 30,
+    xMin: null,
+    xMax: null,
+    showGrid: true,
+    showHover: true,
+  };
+  const FALLBACK_MV_CONFIG: ChartConfig = {
+    ...FALLBACK_PV_CONFIG,
+    yMode: 'manual',
+  };
 
   let {
     variables,
     data,
-    pvConfig,
-    mvConfig,
+    chartConfigsByVariableIndex,
     theme,
     viewMode,
     focusedIndex,
     lineStyles = {},
     variableStats = [],
-    xRangeByVariableIndex = {},
     onRangeChange,
+    onViewportChange,
   }: Props = $props();
 
   const sensorEntries = $derived.by<SensorEntry[]>(() => {
@@ -114,25 +130,6 @@
     return variableColors[index % variableColors.length];
   }
 
-  function getVariableChartConfig(baseConfig: ChartConfig, variableIndex: number): ChartConfig {
-    const range = xRangeByVariableIndex[variableIndex];
-    if (range) {
-      return {
-        ...baseConfig,
-        xMode: 'manual',
-        xMin: range.xMin,
-        xMax: range.xMax,
-      };
-    }
-
-    if (baseConfig.xMode !== 'manual') return baseConfig;
-
-    return {
-      ...baseConfig,
-      xMin: baseConfig.xMin ?? null,
-      xMax: baseConfig.xMax ?? null,
-    };
-  }
 </script>
 
 <div
@@ -141,8 +138,7 @@
   class:variable-grid-container--grid={viewMode !== 'single'}
 >
   {#each visibleSensors as sensorEntry, displayIdx (sensorEntry.variable.id)}
-    {@const cardPvConfig = getVariableChartConfig(pvConfig, sensorEntry.originalIndex)}
-    {@const cardMvConfig = getVariableChartConfig(mvConfig, sensorEntry.originalIndex)}
+    {@const cardConfigs = chartConfigsByVariableIndex[sensorEntry.originalIndex]}
     <div class={viewMode === 'single' ? 'single-sensor-shell w-full' : 'sensor-card-shell'} data-sensor-index={displayIdx}>
       <VariableCard
         title={sensorEntry.variable.name}
@@ -152,14 +148,17 @@
         pvKey={sensorEntry.pvKey}
         spKey={sensorEntry.spKey}
         actuators={sensorEntry.actuators}
-        pvConfig={cardPvConfig}
-        mvConfig={cardMvConfig}
+        pvConfig={cardConfigs?.pvConfig ?? FALLBACK_PV_CONFIG}
+        mvConfig={cardConfigs?.mvConfig ?? FALLBACK_MV_CONFIG}
         {theme}
         colors={getColorSet(displayIdx)}
         {lineStyles}
         stats={variableStats[sensorEntry.originalIndex]}
         onRangeChange={onRangeChange
           ? (xMin: number, xMax: number) => onRangeChange(sensorEntry.originalIndex, xMin, xMax)
+          : undefined}
+        onViewportChange={onViewportChange
+          ? (viewport) => onViewportChange(sensorEntry.originalIndex, viewport)
           : undefined}
       />
     </div>
