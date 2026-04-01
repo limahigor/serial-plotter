@@ -3,29 +3,66 @@
 [![English](https://img.shields.io/badge/Language-English-2563eb?style=for-the-badge)](plants.md)
 [![Português](https://img.shields.io/badge/Idioma-Portugu%C3%AAs-16a34a?style=for-the-badge)](../pt-BR/plants.md)
 
-## Creating a Plant
+## Creating a Plant Step by Step
 
-When creating a plant, define:
+When creating a plant in the `Plotter` module, work through these sections in order.
+
+### 1. Plant identity
+
+Define:
 
 - plant name
 - sample time in milliseconds
-- sensor and actuator variables
-- a driver plugin instance
-- optional controller instances
 
-Each actuator can be linked to one or more sensors for UI and control binding purposes.
+### 2. Variables
 
-## Importing a Plant
+Add the variables that describe the public process model.
+
+Use:
+
+- `sensor` for measured values
+- `atuador` for actuator/output values
+
+For each variable, set:
+
+- display name
+- engineering unit
+- default setpoint
+- minimum and maximum public range
+
+Actuators can be linked to one or more sensors for UI grouping and controller binding purposes.
+
+### 3. Driver instance
+
+Choose the driver plugin the plant will use and fill the instance configuration required by that plugin's schema.
+
+### 4. Controller instances
+
+Optionally add one or more controllers and configure:
+
+- controller display name
+- active/inactive state
+- input variable bindings
+- output variable bindings
+- parameter values
+
+## Importing or Opening a Plant
 
 Senamby supports opening a JSON file for preview before import. After import:
 
 - the plant is registered in the workspace
-- the imported data and stats are available for inspection
-- plugins referenced by the plant are reconciled against the current workspace when possible
+- imported data and stats may become available for inspection
+- referenced plugins are reconciled against the current workspace when possible
 
-## Basic Plant Payload
+This is useful when:
 
-A persisted plant registry uses this basic shape:
+- you received a plant JSON from another environment
+- you want to inspect a file before registering it
+- you want to restore a plant that is not currently loaded in the session
+
+## Persisted Plant Shape
+
+The real persisted payload can include more details, but a simplified plant shape looks like this:
 
 ```json
 {
@@ -64,16 +101,41 @@ A persisted plant registry uses this basic shape:
 
 ## Connecting a Plant
 
-Connecting a plant starts the runtime and live telemetry. During connect, Senamby:
+Connecting a plant starts the runtime and live telemetry.
+
+During connect, Senamby:
 
 - validates the driver and active controllers
 - resolves plugin files from the workspace
-- prepares the Python environment
+- prepares or reuses the Python environment
 - sends the bootstrap to the Python runner
+
+What you should expect after a successful connection:
+
+- charts begin updating in real time
+- runtime state becomes connected/running
+- sensor setpoints can be pushed live
+- controller edits may trigger hot update or `pending_restart`
+
+## Disconnecting a Plant
+
+Disconnecting:
+
+- stops the live runtime
+- keeps the plant open in the current session
+- preserves the saved plant file
+
+Use this when you want to stop execution without unloading the plant UI state.
 
 ## Pause and Resume
 
 Pause and resume are visual session actions. The runtime keeps collecting and controlling in the background while the UI accumulates backlog. On resume, the queued telemetry is plotted.
+
+Use pause when:
+
+- you want to inspect a frozen chart
+- you do not want the graph to keep moving temporarily
+- you still want the runtime to keep running in the background
 
 ## Closing a Plant
 
@@ -98,3 +160,24 @@ Removing a plant:
 ## Setpoints
 
 Setpoints are saved to the plant registry and, when the plant is connected, pushed to the running runtime.
+
+In practice:
+
+- sensors are the variables that normally own setpoints
+- actuator setpoints are not the normal live control path
+- changing a sensor setpoint updates both saved state and live runtime state when connected
+
+## Exporting Plant Data
+
+The plotter can export the current collected session as:
+
+- CSV
+- JSON
+
+Use CSV when you want spreadsheets or scripts.
+
+Use JSON when you want:
+
+- structured archive of the session
+- offline analysis in Senamby's `Analyzer`
+- sensor, setpoint, and actuator relationships preserved

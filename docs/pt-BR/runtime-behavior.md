@@ -7,81 +7,39 @@
 
 Quando uma planta conecta, o backend:
 
-1. resolve o driver e os controladores ativos
+1. resolve o driver salvo e os controladores ativos
 2. atualiza metadados de plugin a partir do workspace quando necessário
-3. prepara o ambiente Python
+3. prepara ou reutiliza o ambiente Python
 4. monta um bootstrap compacto
 5. inicia o runner Python
+6. aguarda o handshake `ready` e `connected`
+7. começa a encaminhar status e telemetria ao vivo para o frontend
 
-## Fronteiras de Payload
+## Canais de Comunicação da Runtime
 
-Na prática, os payloads passam por estas fronteiras:
+O processo da runtime usa três canais:
 
-1. frontend -> backend (commands Tauri)
-2. backend Rust -> runner Python (bootstrap)
-3. runner Python -> plugins Python (`context`, `snapshot`, `outputs`)
-4. runner Python -> frontend (`plant://telemetry`)
+- `stdin`: comandos do Rust para o runner
+- `stdout`: protocolo interno JSON do runner de volta para o Rust
+- `stderr`: logs, tracebacks e saída nativa redirecionada
 
-## Bootstrap (Backend -> Runner)
+Comportamento importante:
 
-O runner é iniciado com um bootstrap contendo:
+- o runner reserva `stdout` para o tráfego do protocolo JSON
+- o runner duplica o descritor original de `stdout` para escrever o protocolo
+- `print()` em Python vai para `stderr`
+- saída comum de `stdout` de bibliotecas nativas também é desviada para `stderr`
 
-- `driver`
-- `controllers`
-- `plant`
-- `runtime`
-
-Exemplo simplificado:
-
-```json
-{
-  "driver": {
-    "plugin_id": "driver_1",
-    "plugin_name": "Driver Serial",
-    "plugin_dir": "...",
-    "source_file": "main.py",
-    "class_name": "SerialDriver",
-    "config": { "port": "COM3" }
-  },
-  "controllers": [
-    {
-      "id": "ctrl_1",
-      "name": "PID Temperatura",
-      "controller_type": "PID",
-      "input_variable_ids": ["sensor_1"],
-      "output_variable_ids": ["actuator_1"],
-      "params": {
-        "kp": { "type": "number", "value": 1.2, "label": "Kp" }
-      }
-    }
-  ],
-  "plant": {
-    "id": "plant_1",
-    "name": "Forno Piloto",
-    "variables": [],
-    "sensor_ids": ["sensor_1"],
-    "actuator_ids": ["actuator_1"],
-    "setpoints": { "sensor_1": 60.0 }
-  },
-  "runtime": {
-    "id": "rt_1",
-    "timing": { "sample_time_ms": 100 },
-    "supervision": {},
-    "paths": {}
-  }
-}
-```
-
-## Regras da Runtime
+## Regras da Runtime ao Vivo
 
 - a runtime só existe enquanto a planta estiver conectada
-- plantas não são carregadas automaticamente no startup
-- controladores podem ser atualizados em tempo real
-- algumas mudanças exigem reconexão e ficam como `pending_restart`
+- plantas não são recarregadas automaticamente no startup
+- controladores podem ser atualizados ao vivo enquanto a planta está conectada
+- algumas mudanças exigem reconexão e viram `pending_restart`
 
 ## Ciclo `read -> control -> write -> publish`
 
-### 1. `read`
+### 1. Read
 
 O runner chama `driver.read()` e espera:
 
@@ -92,9 +50,9 @@ O runner chama `driver.read()` e espera:
 }
 ```
 
-### 2. `control`
+### 2. Control
 
-Para cada controlador ativo, o runner monta um `snapshot` com:
+Para cada controlador ativo, o runner monta um snapshot com:
 
 - `dt_s`
 - `setpoints`
@@ -111,59 +69,73 @@ Depois chama `compute(snapshot)` e recebe:
 }
 ```
 
-### 3. `write`
+### 3. Write
 
-O runner consolida saídas do ciclo e chama:
+O runner consolida as saídas do ciclo e chama:
 
 ```python
 driver.write(outputs)
 ```
 
-### 4. `publish`
+### 4. Publish
 
-O runner publica telemetria para o frontend.
+O runner publica telemetria para o backend, que a encaminha ao frontend como `plant://telemetry`.
 
 ## Backlog do Pause
 
-Pause não interrompe o loop da runtime. O frontend apenas para de plotar temporariamente e acumula backlog. Ao retomar, a telemetria acumulada é reaplicada nos gráficos.
+Pause não interrompe o loop da runtime. O frontend para de plotar temporariamente e acumula backlog de telemetria. Ao retomar, a fila acumulada é reaplicada aos gráficos.
+
+Isso significa:
+
+- o controle continua rodando
+- leituras e escritas do driver continuam acontecendo
+- apenas a renderização dos gráficos é pausada na UI
 
 ## Telemetria e Plotagem
 
 O backend emite eventos achatados `plant://telemetry` para o frontend.
 
-Payload principal (simplificado):
+Regra importante de plotagem:
 
-```json
-{
-  "plant_id": "plant_1",
-  "runtime_id": "rt_1",
-  "timestamp": 1710000000.123,
-  "cycle_id": 17,
-  "configured_sample_time_ms": 100,
-  "effective_dt_ms": 100.0,
-  "cycle_duration_ms": 8.4,
-  "read_duration_ms": 2.1,
-  "control_duration_ms": 1.4,
-  "write_duration_ms": 0.8,
-  "publish_duration_ms": 0.3,
-  "cycle_late": false,
-  "late_by_ms": 0.0,
-  "phase": "publish_telemetry",
-  "uptime_s": 25.6,
-  "sensors": { "sensor_1": 58.2 },
-  "actuators": { "actuator_1": 42.0 },
-  "actuators_read": { "actuator_1": 37.0 },
-  "setpoints": { "sensor_1": 60.0 },
-  "controller_outputs": { "actuator_1": 42.0 },
-  "written_outputs": { "actuator_1": 42.0 }
-}
-```
+- os gráficos de atuador usam atualmente o readback de atuador presente na telemetria
+- eles não usam o payload bruto de escrita como valor principal exibido
 
-Para gráficos de atuador, a regra atual de plotagem usa o readback de atuador presente na telemetria, e não o payload bruto de `write()`.
+A telemetria pode incluir campos como:
 
-## Pastas de Runtime
+- `cycle_id`
+- `configured_sample_time_ms`
+- `effective_dt_ms`
+- `cycle_duration_ms`
+- `read_duration_ms`
+- `control_duration_ms`
+- `write_duration_ms`
+- `publish_duration_ms`
+- `cycle_late`
+- `late_by_ms`
+- `sensors`
+- `actuators`
+- `actuators_read`
+- `setpoints`
+- `controller_outputs`
+- `written_outputs`
 
-Dados persistentes do workspace ficam em:
+## Hot Update e `pending_restart`
+
+Quando a configuração de controlador muda com a planta conectada:
+
+- o Senamby tenta carregar o conjunto atualizado ao vivo
+- se a runtime/ambiente atual aceitar a mudança, o status permanece `synced`
+- se a mudança exigir rebuild do ambiente ou reconexão, o status vira `pending_restart`
+
+Correção típica para `pending_restart`:
+
+1. salvar a mudança do controlador
+2. desconectar a planta
+3. reconectar a planta
+
+## Arquivos de Runtime
+
+Os dados persistentes do workspace ficam em:
 
 - `drivers/`
 - `controllers/`
@@ -174,4 +146,10 @@ Sessões conectadas também usam:
 
 - `runtimes/<runtime_id>/bootstrap.json`
 
-O script do runner Python é gravado uma vez na raiz de runtimes e reutilizado entre sessões.
+O script Python do runner fica na área compartilhada de runtimes e é reutilizado entre sessões.
+
+## Notas de Debug
+
+- erros e logs Python chegam por `stderr`
+- o backend ecoa linhas de `stderr` com o prefixo `driver-runtime`
+- se uma biblioteca nativa bypassar completamente os handles do processo, ainda existe possibilidade teórica de corrupção do protocolo, mas esse deixou de ser o caso comum para saídas estilo `printf`

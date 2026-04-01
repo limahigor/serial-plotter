@@ -3,9 +3,27 @@
 [![English](https://img.shields.io/badge/Language-English-2563eb?style=for-the-badge)](../en/plugin-file-format.md)
 [![Português](https://img.shields.io/badge/Idioma-Portugu%C3%AAs-16a34a?style=for-the-badge)](plugin-file-format.md)
 
-## JSON de Plugin
+## O que este guia cobre
 
-O Senamby aceita arquivos JSON de plugin com esta forma básica:
+Use este documento quando quiser:
+
+- criar um plugin do zero
+- importar um plugin via JSON
+- entender o contrato Python usado em runtime
+- saber quais dados o driver ou controlador recebe
+
+## Runtime suportada
+
+O caminho oficial de execução hoje é **Python**.
+
+Observação importante:
+
+- o importador JSON consegue fazer parse de `runtime: "rust-native"`
+- o fluxo suportado de criação e execução para usuários finais ainda é Python
+
+## Forma do JSON de Plugin
+
+O Senamby aceita arquivos JSON de plugin com esta forma comum:
 
 ```json
 {
@@ -19,6 +37,12 @@ O Senamby aceita arquivos JSON de plugin com esta forma básica:
       "name": "port",
       "type": "string",
       "description": "Porta serial"
+    },
+    {
+      "name": "baudrate",
+      "type": "int",
+      "defaultValue": 115200,
+      "description": "Baud rate serial"
     }
   ],
   "dependencies": [
@@ -26,9 +50,21 @@ O Senamby aceita arquivos JSON de plugin com esta forma básica:
       "name": "pyserial",
       "version": ""
     }
-  ]
+  ],
+  "description": "Driver serial para um dispositivo de teste",
+  "version": "1.0.0",
+  "author": "Seu Nome"
 }
 ```
+
+Aliases aceitos na importação:
+
+- `kind` ou `type`
+- `entryClass` ou `entry_class`
+- `sourceFile` ou `source_file`
+- `defaultValue` ou `default_value`
+
+## Kinds e Tipos de Campo Suportados
 
 Kinds suportados:
 
@@ -43,11 +79,35 @@ Tipos de campo de schema:
 - `string`
 - `list`
 
+Campos de schema podem opcionalmente definir:
+
+- `defaultValue`
+- `description`
+
+## Criando um plugin pela UI
+
+Passo a passo:
+
+1. Abra o módulo `Plugins`
+2. Escolha `Driver` ou `Controller`
+3. Crie um plugin novo ou importe um arquivo JSON
+4. Preencha:
+   - nome
+   - runtime `python`
+   - classe de entrada
+   - arquivo-fonte
+   - campos de schema
+   - dependências Python opcionais
+5. Salve o plugin
+6. Anexe esse plugin a uma planta no módulo `Plotter`
+
 ## Contrato Python de Driver
 
 ```python
+from typing import Any, Dict
+
 class MeuDriver:
-    def __init__(self, context):
+    def __init__(self, context: Any) -> None:
         self.context = context
 
     def connect(self) -> bool:
@@ -56,13 +116,13 @@ class MeuDriver:
     def stop(self) -> bool:
         return True
 
-    def read(self) -> dict[str, dict[str, float]]:
+    def read(self) -> Dict[str, Dict[str, float]]:
         return {
             "sensors": {"var_0": 0.0},
             "actuators": {"var_2": 0.0}
         }
 
-    def write(self, outputs: dict[str, float]) -> bool:
+    def write(self, outputs: Dict[str, float]) -> bool:
         return True
 ```
 
@@ -71,15 +131,14 @@ O contexto público do driver expõe apenas:
 - `context.config`
 - `context.plant`
 
-## Payload de `read()` (Driver -> Runtime)
+### Regras do payload de `read()`
 
-O `read()` deve retornar um objeto com dois mapas:
+`read()` deve retornar um objeto com dois mapas:
 
 ```json
 {
   "sensors": {
-    "sensor_1": 58.2,
-    "sensor_2": 31.0
+    "sensor_1": 58.2
   },
   "actuators": {
     "actuator_1": 37.0
@@ -89,20 +148,20 @@ O `read()` deve retornar um objeto com dois mapas:
 
 Regras práticas:
 
-- as chaves devem ser `id` de variáveis da planta
+- as chaves devem ser ids de variáveis da planta
 - os valores devem ser numéricos finitos
-- chaves desconhecidas são ignoradas pela runtime
-- se `sensors` ou `actuators` vier ausente, a runtime considera `{}` para aquele bloco
+- ausência de `sensors` ou `actuators` é tratada como `{}`
+- chaves desconhecidas são ignoradas
 
-## Payload de `write(outputs)` (Runtime -> Driver)
+### Regras do payload de `write(outputs)`
 
-Quando houver saída de controlador no ciclo, a runtime chama:
+Quando existir saída de controlador no ciclo, a runtime chama:
 
 ```python
 write(outputs)
 ```
 
-Formato de `outputs`:
+`outputs` tem este formato:
 
 ```json
 {
@@ -111,26 +170,42 @@ Formato de `outputs`:
 }
 ```
 
-Esse mapa já vem consolidado no ciclo, no espaço de unidades públicas da planta.
+Esses valores já estão no espaço de unidades públicas da planta.
 
 ## Contrato Python de Controlador
 
 ```python
+from typing import Any, Dict
+
 class MeuControlador:
-    def __init__(self, context):
+    def __init__(self, context: Any) -> None:
         self.context = context
 
-    def compute(self, snapshot: dict[str, object]) -> dict[str, float]:
-        return {
-            actuator_id: 0.0
-            for actuator_id in self.context.controller.output_variable_ids
-        }
+    def compute(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
+        kp = self.context.controller.params["kp"].value
+        sensor_id = self.context.controller.input_variable_ids[0]
+        actuator_id = self.context.controller.output_variable_ids[0]
+        pv = snapshot["sensors"].get(sensor_id, 0.0)
+        sp = snapshot["setpoints"].get(sensor_id, 0.0)
+        erro = sp - pv
+        return {actuator_id: kp * erro}
 ```
 
 O contexto público do controlador expõe apenas:
 
 - `context.controller`
 - `context.plant`
+
+Diferença importante:
+
+- `self.context.controller` é um objeto com atributos
+- `snapshot["controller"]` é um dicionário serializado
+
+Isso significa:
+
+- use `self.context.controller.params["kp"].value`
+- não assuma `self.context["controller"]`
+- não assuma `self.context.controller.params["kp"]["value"]`
 
 ## Estrutura de `context.controller`
 
@@ -143,88 +218,33 @@ Dentro do controlador, `self.context.controller` expõe:
 - `output_variable_ids`
 - `params`
 
-Exemplo de `params`:
+Cada entrada em `params` expõe:
 
-```json
-{
-  "kp": { "type": "number", "value": 1.2, "label": "Kp" },
-  "enabled": { "type": "boolean", "value": true, "label": "Habilitado" },
-  "mode": { "type": "string", "value": "auto", "label": "Modo" }
-}
-```
+- `.type`
+- `.value`
+- `.label`
 
-Uso típico no código:
+## Básico de `compute(snapshot)`
 
-- `self.context.controller.params["kp"]["value"]`
-- `self.context.controller.input_variable_ids`
-- `self.context.controller.output_variable_ids`
+O snapshot do controlador inclui:
 
-## Snapshot Básico
-
-O snapshot de `compute()` inclui:
-
+- `cycle_id`
+- `timestamp`
 - `dt_s`
+- `plant`
 - `setpoints`
 - `sensors`
 - `actuators`
+- `variables_by_id`
 - `controller`
 
-## Snapshot Completo de `compute(snapshot)`
-
-Exemplo de snapshot real (simplificado):
-
-```json
-{
-  "cycle_id": 17,
-  "timestamp": 1710000000.123,
-  "dt_s": 0.1,
-  "plant": {
-    "id": "plant_1",
-    "name": "Forno Piloto"
-  },
-  "setpoints": {
-    "sensor_1": 60.0
-  },
-  "sensors": {
-    "sensor_1": 58.2
-  },
-  "actuators": {
-    "actuator_1": 37.0
-  },
-  "variables_by_id": {
-    "sensor_1": {
-      "id": "sensor_1",
-      "name": "Temperatura",
-      "type": "sensor",
-      "unit": "C",
-      "setpoint": 60.0,
-      "pv_min": 0.0,
-      "pv_max": 100.0,
-      "linked_sensor_ids": []
-    }
-  },
-  "controller": {
-    "id": "ctrl_1",
-    "name": "PID Temperatura",
-    "controller_type": "PID",
-    "input_variable_ids": ["sensor_1"],
-    "output_variable_ids": ["actuator_1"],
-    "params": {
-      "kp": { "type": "number", "value": 1.2, "label": "Kp" }
-    }
-  }
-}
-```
-
-Leitura mais comum no `compute()`:
+Leituras típicas:
 
 - PV atual: `snapshot["sensors"].get(sensor_id, 0.0)`
 - SP atual: `snapshot["setpoints"].get(sensor_id, 0.0)`
-- parâmetros: `self.context.controller.params`
+- readback de atuador: `snapshot["actuators"].get(actuator_id, 0.0)`
 
-`snapshot["actuators"]` representa o readback de atuador lido no ciclo.
-
-## Payload de Retorno de `compute()` (Controlador -> Runtime)
+## Payload de retorno do Controlador
 
 `compute()` deve retornar um mapa `{actuator_id: valor}`:
 
@@ -236,10 +256,10 @@ Leitura mais comum no `compute()`:
 
 Regras práticas:
 
-- use IDs de atuador presentes em `output_variable_ids`
+- use ids de atuador presentes em `output_variable_ids`
 - valores devem ser numéricos finitos
-- IDs não permitidos são ignorados pela runtime
-- erro de tipo (ex.: string em vez de número) invalida aquele ciclo do controlador
+- ids inválidos são ignorados
+- tipos numéricos inválidos podem invalidar o ciclo daquele controlador
 
 ## Unidades Públicas vs Unidades do Dispositivo
 
@@ -249,13 +269,17 @@ Exemplo:
 
 - faixa pública do atuador: `0..100`
 - duty cycle do dispositivo: `0..255`
-- `write()` converte saída pública para a unidade crua
-- `read()` converte feedback cru de volta para a unidade pública
+- `write()` converte saída pública para unidade crua
+- `read()` converte feedback cru de volta para unidade pública
 
-## Fluxo Resumido de Payloads
+## Logs e Bibliotecas Nativas
 
-1. Driver recebe `context.config` e `context.plant`.
-2. Driver executa `read()` e retorna `sensors/actuators`.
-3. Runtime monta `snapshot` para cada controlador.
-4. Controlador executa `compute(snapshot)` e retorna saídas por `actuator_id`.
-5. Runtime consolida as saídas e chama `driver.write(outputs)`.
+A runtime reserva `stdout` para o protocolo interno em JSON.
+
+Recomendação para autores de plugin:
+
+- use logging Python ou `stderr` para logs
+- evite imprimir texto arbitrário em `stdout`
+- ao chamar bibliotecas nativas, prefira bibliotecas que loguem em `stderr`
+
+O runner atual redireciona a maior parte da saída nativa comum de `stdout` para `stderr`, mas log explícito em `stderr` continua sendo o caminho mais seguro para diagnóstico de plugin.
