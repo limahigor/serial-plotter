@@ -376,14 +376,51 @@ class PlantRuntimeEngine:
         }
         return json.dumps(serialized, sort_keys=True, ensure_ascii=True)
 
+    def _controller_runtime_reload_fingerprint(
+        self,
+        metadata: ControllerMetadata,
+    ) -> str:
+        serialized = {
+            "id": metadata.id,
+            "plugin_id": metadata.plugin_id,
+            "plugin_name": metadata.plugin_name,
+            "plugin_dir": metadata.plugin_dir,
+            "source_file": metadata.source_file,
+            "class_name": metadata.class_name,
+            "active": metadata.active,
+            "input_variable_ids": list(metadata.input_variable_ids),
+            "output_variable_ids": list(metadata.output_variable_ids),
+        }
+        return json.dumps(serialized, sort_keys=True, ensure_ascii=True)
+
     def _can_preserve_loaded_controller(
         self,
         current: LoadedController,
         next_metadata: ControllerMetadata,
     ) -> bool:
-        return self._controller_metadata_fingerprint(
+        current_fingerprint = self._controller_metadata_fingerprint(current.metadata)
+        next_fingerprint = self._controller_metadata_fingerprint(next_metadata)
+        if current_fingerprint == next_fingerprint:
+            return True
+
+        return self._controller_runtime_reload_fingerprint(
             current.metadata
-        ) == self._controller_metadata_fingerprint(next_metadata)
+        ) == self._controller_runtime_reload_fingerprint(next_metadata)
+
+    def _refresh_loaded_controller(
+        self,
+        current: LoadedController,
+        next_metadata: ControllerMetadata,
+    ) -> LoadedController:
+        sync_loaded_controller_runtime_context(
+            current.instance,
+            build_controller_plugin_context(next_metadata, self.bootstrap.plant),
+        )
+        return LoadedController(
+            metadata=next_metadata,
+            public_metadata=build_public_controller_metadata(next_metadata).serialize(),
+            instance=current.instance,
+        )
 
     def _apply_loaded_controllers(
         self,
@@ -681,7 +718,10 @@ class PlantRuntimeEngine:
                     current,
                     controller_meta,
                 ):
-                    preserved_by_id[controller_meta.id] = current
+                    preserved_by_id[controller_meta.id] = self._refresh_loaded_controller(
+                        current,
+                        controller_meta,
+                    )
                     continue
 
                 loaded_controller = self._load_controller(controller_meta)
@@ -1250,6 +1290,49 @@ def enrich_legacy_controller_aliases(
             attr_name,
             copy.deepcopy(getattr(context.controller, attr_name)),
         )
+
+
+def overwrite_attribute(target: Any, attr_name: str, value: Any) -> None:
+    try:
+        setattr(target, attr_name, value)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def sync_controller_public_metadata(target: Any, metadata: ControllerPublicMetadata) -> None:
+    for attr_name in (
+        "id",
+        "name",
+        "controller_type",
+        "input_variable_ids",
+        "output_variable_ids",
+        "params",
+    ):
+        overwrite_attribute(target, attr_name, copy.deepcopy(getattr(metadata, attr_name)))
+
+
+def sync_loaded_controller_runtime_context(
+    instance: Any,
+    context: ControllerPluginContext,
+) -> None:
+    overwrite_attribute(instance, "context", context)
+    overwrite_attribute(instance, "plant", context.plant)
+
+    try:
+        controller_alias = getattr(instance, "controller")
+    except AttributeError:
+        controller_alias = None
+    except Exception:  # noqa: BLE001
+        return
+
+    if controller_alias is None:
+        overwrite_attribute(instance, "controller", copy.deepcopy(context.controller))
+        return
+
+    if controller_alias is context.controller:
+        return
+
+    sync_controller_public_metadata(controller_alias, context.controller)
 
 
 def coerce_required_bool(method_name: str, result: Any) -> bool:

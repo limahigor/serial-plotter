@@ -659,6 +659,71 @@ class RunnerContractTests(unittest.TestCase):
             finally:
                 engine.stop()
 
+    def test_update_controllers_preserves_instance_when_only_params_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bootstrap = self.build_multi_channel_bootstrap(Path(tmp_dir))
+            bootstrap.controllers[0].params = {
+                "kp": runner.ControllerParamSpec(
+                    key="kp",
+                    type="number",
+                    value=1.0,
+                    label="Kp",
+                )
+            }
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            try:
+                engine.start()
+
+                first_loaded = engine.controllers[0]
+                first_instance = first_loaded.instance
+                self.assertEqual(first_instance.connect_calls, 1)
+
+                next_controllers = [
+                    runner.ControllerMetadata(
+                        id=first_loaded.metadata.id,
+                        plugin_id=first_loaded.metadata.plugin_id,
+                        plugin_name=first_loaded.metadata.plugin_name,
+                        plugin_dir=first_loaded.metadata.plugin_dir,
+                        source_file=first_loaded.metadata.source_file,
+                        class_name=first_loaded.metadata.class_name,
+                        name="Controller 1 Tuned",
+                        controller_type="PI",
+                        active=True,
+                        input_variable_ids=list(first_loaded.metadata.input_variable_ids),
+                        output_variable_ids=list(first_loaded.metadata.output_variable_ids),
+                        params={
+                            "kp": runner.ControllerParamSpec(
+                                key="kp",
+                                type="number",
+                                value=2.5,
+                                label="Kp",
+                            )
+                        },
+                    )
+                ]
+
+                engine.update_controllers(next_controllers)
+
+                for _ in range(50):
+                    time.sleep(0.01)
+                    engine.apply_pending_controller_reload()
+                    if engine.controllers[0].metadata.params["kp"].value == 2.5:
+                        break
+
+                self.assertEqual(len(engine.controllers), 1)
+                self.assertIs(engine.controllers[0].instance, first_instance)
+                self.assertEqual(first_instance.connect_calls, 1)
+                self.assertEqual(first_instance.stop_calls, 0)
+                self.assertEqual(engine.controllers[0].metadata.name, "Controller 1 Tuned")
+                self.assertEqual(engine.controllers[0].metadata.controller_type, "PI")
+                self.assertEqual(engine.controllers[0].metadata.params["kp"].value, 2.5)
+                self.assertEqual(
+                    engine.controllers[0].instance.context.controller.params["kp"].value,
+                    2.5,
+                )
+            finally:
+                engine.stop()
+
     def test_run_cycle_writes_distinct_outputs_for_distinct_controller_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             bootstrap = self.build_multi_channel_bootstrap(Path(tmp_dir))
