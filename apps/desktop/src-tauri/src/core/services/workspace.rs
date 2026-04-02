@@ -68,6 +68,22 @@ impl WorkspaceService {
     pub fn runtime_root_directory() -> AppResult<PathBuf> {
         paths::runtime_root_directory()
     }
+
+    pub fn console_root_directory() -> AppResult<PathBuf> {
+        paths::console_root_directory()
+    }
+
+    pub fn console_logs_directory() -> AppResult<PathBuf> {
+        paths::console_logs_directory()
+    }
+
+    pub fn console_alerts_path() -> AppResult<PathBuf> {
+        paths::console_alerts_path()
+    }
+
+    pub fn console_state_path() -> AppResult<PathBuf> {
+        paths::console_state_path()
+    }
 }
 
 #[cfg(test)]

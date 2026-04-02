@@ -10,6 +10,7 @@ Senamby is a desktop workspace for creating, running, and analyzing plants drive
 - **Plotter Workspace** for creating plants, connecting runtimes, plotting live data, and exporting sessions
 - **Plugins workspace** for creating, importing, editing, and deleting reusable drivers and controllers
 - **Analyzer** for loading exported JSON datasets and reviewing sensor, setpoint, and actuator behavior offline
+- **Console** for centralized frontend/backend/runtime logs and alert rules
 
 ## Main User Workflows
 
@@ -35,6 +36,7 @@ If you are running Senamby from source:
    - `Plugins` to manage drivers and controllers
    - `Plotter` to manage plants and live runtimes
    - `Analyzer` to inspect exported JSON sessions
+   - `Console` to review logs and manage alert rules
 
 The current frontend scripts live in `apps/desktop/package.json`, including `pnpm --dir apps/desktop tauri dev`.
 

@@ -9,6 +9,7 @@ import type {
   ExportDataSample,
 } from '$lib/types/plantExport';
 import { EXPORT_FORMAT_VERSION } from '$lib/types/plantExport';
+import { appLogger } from '$lib/services/appLogger';
 
 
 function sanitizeName(name: string): string {
@@ -68,7 +69,7 @@ async function saveContent(
     });
     return true;
   } catch (error) {
-    console.error('Falha ao salvar arquivo de exportação:', error);
+    appLogger.error('Falha ao salvar arquivo de exportação:', error);
     return false;
   }
 }

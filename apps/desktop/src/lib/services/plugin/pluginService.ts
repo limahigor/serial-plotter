@@ -17,6 +17,7 @@ import type {
 import { generateId } from '$lib/utils/format';
 import { loadWorkspaceState as loadStoredWorkspaceState, saveWorkspaceState as saveStoredWorkspaceState } from '$lib/utils/workspaceStorage';
 import { extractServiceErrorMessage } from '$lib/services/shared/errorMessage';
+import { appLogger } from '$lib/services/appLogger';
 
 const STORAGE_KEY = 'senamby.desktop.plugins.workspace';
 
@@ -111,7 +112,7 @@ async function listBackendPlugins(): Promise<PluginDefinition[]> {
     const response = await invoke<PluginRegistryDto[]>('list_plugins');
     return response.map(mapDtoToPlugin);
   } catch (error) {
-    console.warn('Backend de plugins indisponível, usando somente catálogo local:', error);
+    appLogger.warn('Backend de plugins indisponível, usando somente catálogo local:', error);
     return [];
   }
 }
@@ -121,7 +122,7 @@ export async function loadSystemPlugins(): Promise<PluginDefinition[]> {
     const response = await invoke<PluginRegistryDto[]>('load_plugins');
     return response.map(mapDtoToPlugin);
   } catch (error) {
-    console.warn('Falha ao carregar plugins do sistema na inicialização:', error);
+    appLogger.warn('Falha ao carregar plugins do sistema na inicialização:', error);
     return [];
   }
 }
@@ -131,7 +132,7 @@ async function listBackendPluginsByType(kind: BuiltInPluginKind): Promise<Plugin
     const response = await invoke<PluginRegistryDto[]>('list_plugins_by_type', { pluginType: kind });
     return response.map(mapDtoToPlugin);
   } catch (error) {
-    console.warn(`Backend de plugins indisponível para o tipo "${kind}", usando catálogo local:`, error);
+    appLogger.warn(`Backend de plugins indisponível para o tipo "${kind}", usando catálogo local:`, error);
     return [];
   }
 }

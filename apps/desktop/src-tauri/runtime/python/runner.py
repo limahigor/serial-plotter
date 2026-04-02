@@ -160,12 +160,14 @@ class ControllerPublicMetadata:
 class DriverPluginContext:
     config: Dict[str, JSONValue]
     plant: PlantContext
+    logger: "RuntimePluginLogger"
 
 
 @dataclass(frozen=True)
 class ControllerPluginContext:
     controller: ControllerPublicMetadata
     plant: PlantContext
+    logger: "RuntimePluginLogger"
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,56 @@ class ControllerReloadResult:
     fresh_loaded: List[LoadedController] = field(default_factory=list)
     stale_loaded: List[LoadedController] = field(default_factory=list)
     error: Optional[str] = None
+
+
+class RuntimePluginLogger:
+    def __init__(
+        self,
+        *,
+        source_kind: str,
+        runtime_id: str,
+        plant_id: str,
+        plugin_id: str,
+        plugin_name: str,
+        controller_id: Optional[str] = None,
+        controller_name: Optional[str] = None,
+    ) -> None:
+        self.source_kind = source_kind
+        self.runtime_id = runtime_id
+        self.plant_id = plant_id
+        self.plugin_id = plugin_id
+        self.plugin_name = plugin_name
+        self.controller_id = controller_id
+        self.controller_name = controller_name
+
+    def debug(self, message: Any, details: Any = None) -> None:
+        self._emit("debug", message, details)
+
+    def info(self, message: Any, details: Any = None) -> None:
+        self._emit("info", message, details)
+
+    def warning(self, message: Any, details: Any = None) -> None:
+        self._emit("warning", message, details)
+
+    def error(self, message: Any, details: Any = None) -> None:
+        self._emit("error", message, details)
+
+    def _emit(self, level: str, message: Any, details: Any = None) -> None:
+        payload: Dict[str, Any] = {
+            "level": level,
+            "message": str(message),
+            "source_kind": self.source_kind,
+            "plugin_id": self.plugin_id,
+            "plugin_name": self.plugin_name,
+        }
+        if self.controller_id is not None:
+            payload["controller_id"] = self.controller_id
+        if self.controller_name is not None:
+            payload["controller_name"] = self.controller_name
+        normalized_details = normalize_log_details(details)
+        if normalized_details is not None:
+            payload["details"] = normalized_details
+        emit("log", payload)
 
 
 class PlantRuntimeEngine:
@@ -272,6 +324,9 @@ class PlantRuntimeEngine:
                 driver_context,
                 "driver",
             )
+            attach_missing_attribute(self.driver_instance, "context", driver_context)
+            attach_missing_attribute(self.driver_instance, "plant", driver_context.plant)
+            attach_missing_attribute(self.driver_instance, "logger", driver_context.logger)
 
             if self.bootstrap.controllers and not callable(
                 getattr(self.driver_instance, DRIVER_WRITE_METHOD, None)
@@ -338,6 +393,7 @@ class PlantRuntimeEngine:
         context = build_controller_plugin_context(
             controller_meta,
             self.bootstrap.plant,
+            self.bootstrap.runtime.id,
         )
         instance = instantiate_plugin(
             controller_cls,
@@ -414,7 +470,11 @@ class PlantRuntimeEngine:
     ) -> LoadedController:
         sync_loaded_controller_runtime_context(
             current.instance,
-            build_controller_plugin_context(next_metadata, self.bootstrap.plant),
+            build_controller_plugin_context(
+                next_metadata,
+                self.bootstrap.plant,
+                self.bootstrap.runtime.id,
+            ),
         )
         return LoadedController(
             metadata=next_metadata,
@@ -578,7 +638,15 @@ class PlantRuntimeEngine:
                 )
         except Exception as exc:  # noqa: BLE001
             log_error(traceback.format_exc())
-            emit("warning", {"message": f"Falha em leitura de driver: {exc}"})
+            emit(
+                "warning",
+                {
+                    "message": f"Falha em leitura de driver: {exc}",
+                    "source_kind": "driver",
+                    "plugin_id": self.bootstrap.driver.plugin_id,
+                    "plugin_name": self.bootstrap.driver.plugin_name,
+                },
+            )
         read_duration_ms = (time.monotonic() - read_started_at) * 1000.0
 
         control_started_at = time.monotonic()
@@ -611,6 +679,11 @@ class PlantRuntimeEngine:
                     "warning",
                     {
                         "message": f"Falha no controlador '{controller.metadata.name}': {exc}",
+                        "source_kind": "controller",
+                        "plugin_id": controller.metadata.plugin_id,
+                        "plugin_name": controller.metadata.plugin_name,
+                        "controller_id": controller.metadata.id,
+                        "controller_name": controller.metadata.name,
                     },
                 )
             finally:
@@ -631,7 +704,15 @@ class PlantRuntimeEngine:
                 written_outputs = dict(controller_outputs)
             except Exception as exc:  # noqa: BLE001
                 log_error(traceback.format_exc())
-                emit("warning", {"message": f"Falha em escrita de driver: {exc}"})
+                emit(
+                    "warning",
+                    {
+                        "message": f"Falha em escrita de driver: {exc}",
+                        "source_kind": "driver",
+                        "plugin_id": self.bootstrap.driver.plugin_id,
+                        "plugin_name": self.bootstrap.driver.plugin_name,
+                    },
+                )
         write_duration_ms = (time.monotonic() - write_started_at) * 1000.0
 
         return (
@@ -667,7 +748,15 @@ class PlantRuntimeEngine:
             try:
                 stopped = coerce_required_bool("stop", self.driver_instance.stop())
                 if not stopped:
-                    emit("warning", {"message": "Driver retornou False em stop()"})
+                    emit(
+                        "warning",
+                        {
+                            "message": "Driver retornou False em stop()",
+                            "source_kind": "driver",
+                            "plugin_id": self.bootstrap.driver.plugin_id,
+                            "plugin_name": self.bootstrap.driver.plugin_name,
+                        },
+                    )
             except Exception as exc:  # noqa: BLE001
                 log_error(f"Falha ao finalizar driver: {exc}")
 
@@ -880,6 +969,24 @@ def log_exception(exc: BaseException) -> None:
         log_error(str(exc))
         return
     log_error(traceback.format_exc())
+
+
+def normalize_log_details(value: Any) -> JSONValue | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return cast(JSONValue, value)
+    if isinstance(value, list):
+        return [
+            cast(JSONValue, normalize_log_details(item))
+            for item in value
+        ]
+    if isinstance(value, dict):
+        normalized: Dict[str, JSONValue] = {}
+        for key, item in value.items():
+            normalized[str(key)] = cast(JSONValue, normalize_log_details(item))
+        return cast(JSONValue, normalized)
+    return cast(JSONValue, str(value))
 
 
 def expect_dict(raw_value: Any, context: str) -> JsonObject:
@@ -1260,6 +1367,7 @@ def enrich_legacy_controller_aliases(
 ) -> None:
     attach_missing_attribute(instance, "context", context)
     attach_missing_attribute(instance, "plant", context.plant)
+    attach_missing_attribute(instance, "logger", context.logger)
 
     try:
         controller_alias = getattr(instance, "controller")
@@ -1317,6 +1425,7 @@ def sync_loaded_controller_runtime_context(
 ) -> None:
     overwrite_attribute(instance, "context", context)
     overwrite_attribute(instance, "plant", context.plant)
+    overwrite_attribute(instance, "logger", context.logger)
 
     try:
         controller_alias = getattr(instance, "controller")
@@ -1453,16 +1562,33 @@ def build_driver_plugin_context(bootstrap: RuntimeBootstrap) -> DriverPluginCont
     return DriverPluginContext(
         config=cast(Dict[str, JSONValue], copy.deepcopy(bootstrap.driver.config)),
         plant=bootstrap.plant,
+        logger=RuntimePluginLogger(
+            source_kind="driver",
+            runtime_id=bootstrap.runtime.id,
+            plant_id=bootstrap.plant.id,
+            plugin_id=bootstrap.driver.plugin_id,
+            plugin_name=bootstrap.driver.plugin_name,
+        ),
     )
 
 
 def build_controller_plugin_context(
     controller: ControllerMetadata,
     plant: PlantContext,
+    runtime_id: str,
 ) -> ControllerPluginContext:
     return ControllerPluginContext(
         controller=build_public_controller_metadata(controller),
         plant=plant,
+        logger=RuntimePluginLogger(
+            source_kind="controller",
+            runtime_id=runtime_id,
+            plant_id=plant.id,
+            plugin_id=controller.plugin_id,
+            plugin_name=controller.plugin_name,
+            controller_id=controller.id,
+            controller_name=controller.name,
+        ),
     )
 
 

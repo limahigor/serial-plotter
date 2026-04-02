@@ -6,8 +6,11 @@
   import PlotterWorkspaceModule from '$lib/components/modules/PlotterWorkspaceModule.svelte';
   import AnalyzerModule from '$lib/components/modules/AnalyzerModule.svelte';
   import PluginsModule from '$lib/components/modules/PluginsModule.svelte';
+  import ConsoleModule from '$lib/components/modules/ConsoleModule.svelte';
   import GlobalSettingsModal from '$lib/components/modals/GlobalSettingsModal.svelte';
+  import { appLogger, installAppLogger } from '$lib/services/appLogger';
   import { loadSystemPlugins } from '$lib/services/plugin';
+  import { consoleStore } from '$lib/stores/consoleStore.svelte';
 
   let showControllerPanel = $state(false);
   let isMobileLayout = $state(false);
@@ -25,16 +28,21 @@
     updateLayoutState();
     const handleResize = () => updateLayoutState();
     window.addEventListener('resize', handleResize);
+    const cleanupLogger = installAppLogger();
 
     void (async () => {
       try {
+        await consoleStore.initialize();
         await loadSystemPlugins();
       } catch (error) {
-        console.error('Erro ao carregar plugins iniciais:', error);
+        appLogger.error('Erro ao carregar plugins iniciais:', error);
       }
     })();
 
-    return () => window.removeEventListener('resize', handleResize);
+    return () => {
+      cleanupLogger();
+      window.removeEventListener('resize', handleResize);
+    };
   });
 
   $effect(() => {
@@ -103,6 +111,12 @@
         <PluginsModule
           theme={appStore.state.theme || 'dark'}
           active={appStore.state.activeModule === 'plugins'}
+        />
+      </div>
+      <div class="flex-1 flex flex-col min-w-0 min-h-0" style:display={appStore.state.activeModule === 'console' ? 'flex' : 'none'}>
+        <ConsoleModule
+          theme={appStore.state.theme || 'dark'}
+          active={appStore.state.activeModule === 'console'}
         />
       </div>
 

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { appStore } from '$lib/stores/data.svelte';
+  import { consoleStore } from '$lib/stores/consoleStore.svelte';
   import SidebarBtn from './SidebarBtn.svelte';
-  import { TrendingUp, BarChart3, Puzzle, Sun, Moon, Settings as SettingsIcon, X } from 'lucide-svelte';
+  import { TrendingUp, BarChart3, Puzzle, SquareTerminal, Sun, Moon, Settings as SettingsIcon, X } from 'lucide-svelte';
   import { MODULE_TABS } from '$lib/types/ui';
 
   interface Props {
@@ -47,7 +48,7 @@
     toggleSidebar();
   }
 
-  function selectModule(module: 'plotter' | 'analyzer' | 'plugins') {
+  function selectModule(module: 'plotter' | 'analyzer' | 'plugins' | 'console') {
     appStore.setActiveModule(module);
     onNavigate?.();
   }
@@ -106,6 +107,14 @@
       active={activeModule === 'plugins'}
       collapsed={isCollapsed}
       onclick={() => selectModule('plugins')}
+    />
+    <SidebarBtn
+      icon={SquareTerminal}
+      label={MODULE_TABS.console.label}
+      active={activeModule === 'console'}
+      collapsed={isCollapsed}
+      badgeCount={consoleStore.badgeCount}
+      onclick={() => selectModule('console')}
     />
   </nav>
 

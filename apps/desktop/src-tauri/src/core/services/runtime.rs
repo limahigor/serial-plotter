@@ -27,7 +27,7 @@ use crate::core::models::plant::{
 use crate::core::models::plugin::{PluginRegistry, PluginRuntime, PluginType};
 use crate::core::services::plant::PlantService;
 use crate::core::services::plugin::PluginService;
-use crate::state::{PlantStore, PluginStore};
+use crate::state::{ConsoleStore, PlantStore, PluginStore};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -429,6 +429,7 @@ impl PlantRuntimeManager {
     fn start_runtime<R: Runtime + 'static>(
         &self,
         app: &AppHandle<R>,
+        console: Arc<ConsoleStore>,
         plant: &Plant,
         driver_plugin: &PluginRegistry,
         active_controllers: &[ResolvedRuntimeController],
@@ -518,14 +519,23 @@ impl PlantRuntimeManager {
 
             let stdout_task = spawn_stdout_task(
                 app.clone(),
+                console.clone(),
                 plant.id.clone(),
+                plant.name.clone(),
                 runtime_id.clone(),
                 plant.sample_time_ms,
                 stdout,
                 handshake.clone(),
                 metrics.clone(),
             );
-            let stderr_task = spawn_stderr_task(plant.id.clone(), runtime_id.clone(), stderr);
+            let stderr_task = spawn_stderr_task(
+                app.clone(),
+                console,
+                plant.id.clone(),
+                plant.name.clone(),
+                runtime_id.clone(),
+                stderr,
+            );
 
             let startup = (|| -> AppResult<()> {
                 send_command(
@@ -807,6 +817,7 @@ impl DriverRuntimeService {
         plants: &PlantStore,
         plugins: &PluginStore,
         manager: &PlantRuntimeManager,
+        console: Arc<ConsoleStore>,
         plant_id: &str,
     ) -> AppResult<Plant> {
         PluginService::load_all(plugins)?;
@@ -820,7 +831,14 @@ impl DriverRuntimeService {
 
         let (plant, driver, active_controllers, runtime_plugins) =
             resolve_runtime_components_for_connect(plants, plugins, plant)?;
-        manager.start_runtime(app, &plant, &driver, &active_controllers, runtime_plugins)?;
+        manager.start_runtime(
+            app,
+            console,
+            &plant,
+            &driver,
+            &active_controllers,
+            runtime_plugins,
+        )?;
 
         let updated = plants.update(plant_id, |plant| {
             plant.connected = true;

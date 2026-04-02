@@ -1,8 +1,10 @@
 pub mod app_state;
+pub mod console_store;
 pub mod plant_store;
 pub mod plugin_store;
 
 pub use app_state::AppState;
+pub use console_store::ConsoleStore;
 pub use plant_store::PlantStore;
 pub use plugin_store::PluginStore;
 
