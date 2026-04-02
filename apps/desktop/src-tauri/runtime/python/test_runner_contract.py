@@ -63,6 +63,38 @@ def parse_protocol_lines(raw_stdout: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in raw_stdout.splitlines() if line.strip()]
 
 
+class FakeClock:
+    def __init__(
+        self,
+        *,
+        start_ns: int = 1_000_000_000_000,
+        wall_now: float = 1_700_000_000.0,
+        sleep_overshoot_ns: int = 0,
+        yield_step_ns: int = 250_000,
+    ) -> None:
+        self.start_ns = start_ns
+        self.monotonic_now_ns = start_ns
+        self.wall_now = wall_now
+        self.sleep_overshoot_ns = sleep_overshoot_ns
+        self.yield_step_ns = yield_step_ns
+
+    def monotonic_ns(self) -> int:
+        return self.monotonic_now_ns
+
+    def time(self) -> float:
+        return self.wall_now + (
+            (self.monotonic_now_ns - self.start_ns) / runner.NANOSECONDS_PER_SECOND
+        )
+
+    def sleep(self, duration: float) -> None:
+        duration_ns = max(0, int(duration * runner.NANOSECONDS_PER_SECOND))
+        if duration_ns > 0:
+            self.monotonic_now_ns += duration_ns + self.sleep_overshoot_ns
+            return
+
+        self.monotonic_now_ns += self.yield_step_ns
+
+
 class RunnerContractTests(unittest.TestCase):
     def build_bootstrap(self, root: Path) -> Any:
         plant_variables = [
@@ -798,20 +830,6 @@ class RunnerContractTests(unittest.TestCase):
                 engine.stop()
 
     def test_engine_uptime_progresses_from_first_cycle_start(self) -> None:
-        class FakeClock:
-            def __init__(self) -> None:
-                self.monotonic_now = 1000.0
-                self.wall_now = 1700000000.0
-
-            def monotonic(self) -> float:
-                return self.monotonic_now
-
-            def time(self) -> float:
-                return self.wall_now + (self.monotonic_now - 1000.0)
-
-            def sleep(self, duration: float) -> None:
-                self.monotonic_now += max(0.0, duration)
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             original_bootstrap = self.build_bootstrap(Path(tmp_dir))
             bootstrap = runner.RuntimeBootstrap(
@@ -839,7 +857,7 @@ class RunnerContractTests(unittest.TestCase):
                     telemetry_payloads.append(payload)
 
             with (
-                patch.object(runner.time, "monotonic", fake_clock.monotonic),
+                patch.object(runner.time, "monotonic_ns", fake_clock.monotonic_ns),
                 patch.object(runner.time, "time", fake_clock.time),
                 patch.object(runner.time, "sleep", fake_clock.sleep),
                 patch.object(runner, "emit", capture_emit),
@@ -856,6 +874,129 @@ class RunnerContractTests(unittest.TestCase):
             self.assertAlmostEqual(telemetry_payloads[0]["uptime_s"], 0.0, places=6)
             self.assertAlmostEqual(telemetry_payloads[1]["uptime_s"], 1.0, places=6)
             self.assertAlmostEqual(telemetry_payloads[2]["uptime_s"], 2.0, places=6)
+
+    def test_engine_effective_dt_stays_stable_with_sleep_overshoot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_bootstrap = self.build_bootstrap(Path(tmp_dir))
+            bootstrap = runner.RuntimeBootstrap(
+                driver=original_bootstrap.driver,
+                controllers=original_bootstrap.controllers,
+                plant=original_bootstrap.plant,
+                runtime=runner.RuntimeContext(
+                    id=original_bootstrap.runtime.id,
+                    timing=runner.RuntimeTiming(
+                        owner=original_bootstrap.runtime.timing.owner,
+                        clock=original_bootstrap.runtime.timing.clock,
+                        strategy=original_bootstrap.runtime.timing.strategy,
+                        sample_time_ms=1000,
+                    ),
+                    supervision=original_bootstrap.runtime.supervision,
+                    paths=original_bootstrap.runtime.paths,
+                ),
+            )
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            fake_clock = FakeClock(sleep_overshoot_ns=4_000_000)
+            telemetry_payloads: list[dict[str, Any]] = []
+
+            def capture_emit(msg_type: str, payload: dict[str, Any] | None = None) -> None:
+                if msg_type == "telemetry" and payload is not None:
+                    telemetry_payloads.append(payload)
+
+            with (
+                patch.object(runner.time, "monotonic_ns", fake_clock.monotonic_ns),
+                patch.object(runner.time, "time", fake_clock.time),
+                patch.object(runner.time, "sleep", fake_clock.sleep),
+                patch.object(runner, "emit", capture_emit),
+            ):
+                try:
+                    engine.start()
+                    engine.run_cycle()
+                    engine.run_cycle()
+                    engine.run_cycle()
+                finally:
+                    engine.stop()
+
+            self.assertEqual(len(telemetry_payloads), 3)
+            self.assertAlmostEqual(telemetry_payloads[1]["effective_dt_ms"], 1000.0, places=6)
+            self.assertAlmostEqual(telemetry_payloads[2]["effective_dt_ms"], 1000.0, places=6)
+
+    def test_engine_resume_keeps_raw_dt_and_excludes_pause_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_bootstrap = self.build_bootstrap(Path(tmp_dir))
+            bootstrap = runner.RuntimeBootstrap(
+                driver=original_bootstrap.driver,
+                controllers=original_bootstrap.controllers,
+                plant=original_bootstrap.plant,
+                runtime=runner.RuntimeContext(
+                    id=original_bootstrap.runtime.id,
+                    timing=runner.RuntimeTiming(
+                        owner=original_bootstrap.runtime.timing.owner,
+                        clock=original_bootstrap.runtime.timing.clock,
+                        strategy=original_bootstrap.runtime.timing.strategy,
+                        sample_time_ms=1000,
+                    ),
+                    supervision=original_bootstrap.runtime.supervision,
+                    paths=original_bootstrap.runtime.paths,
+                ),
+            )
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            fake_clock = FakeClock()
+            telemetry_payloads: list[dict[str, Any]] = []
+
+            def capture_emit(msg_type: str, payload: dict[str, Any] | None = None) -> None:
+                if msg_type == "telemetry" and payload is not None:
+                    telemetry_payloads.append(payload)
+
+            with (
+                patch.object(runner.time, "monotonic_ns", fake_clock.monotonic_ns),
+                patch.object(runner.time, "time", fake_clock.time),
+                patch.object(runner.time, "sleep", fake_clock.sleep),
+                patch.object(runner, "emit", capture_emit),
+            ):
+                try:
+                    engine.start()
+                    engine.run_cycle()
+                    engine.pause()
+                    fake_clock.sleep(5.0)
+                    engine.resume()
+                    engine.run_cycle()
+                finally:
+                    engine.stop()
+
+            self.assertEqual(len(telemetry_payloads), 2)
+            self.assertAlmostEqual(telemetry_payloads[1]["effective_dt_ms"], 1000.0, places=6)
+            self.assertAlmostEqual(telemetry_payloads[1]["uptime_s"], 1.0, places=6)
+
+    def test_next_wait_timeout_reserves_fine_window_for_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bootstrap = self.build_bootstrap(Path(tmp_dir))
+            engine = runner.PlantRuntimeEngine(bootstrap)
+            fake_clock = FakeClock()
+
+            with (
+                patch.object(runner.time, "monotonic_ns", fake_clock.monotonic_ns),
+                patch.object(runner, "emit", lambda *_args, **_kwargs: None),
+            ):
+                try:
+                    engine.start()
+                    self.assertEqual(engine.next_wait_timeout(), 0.0)
+
+                    engine.run_cycle()
+                    self.assertIsNotNone(engine.next_cycle_deadline_ns)
+
+                    fake_clock.monotonic_now_ns = (
+                        engine.next_cycle_deadline_ns - runner.FINE_SLEEP_WINDOW_NS - 1_000_000
+                    )
+                    timeout_before_window = engine.next_wait_timeout()
+                    self.assertIsNotNone(timeout_before_window)
+                    self.assertGreater(timeout_before_window or 0.0, 0.0)
+
+                    fake_clock.monotonic_now_ns = (
+                        engine.next_cycle_deadline_ns - runner.FINE_SLEEP_WINDOW_NS + 1_000_000
+                    )
+                    self.assertEqual(engine.next_wait_timeout(), 0.0)
+                finally:
+                    engine.stop()
 
 
 class RunnerProtocolStreamTests(unittest.TestCase):

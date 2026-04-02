@@ -29,6 +29,11 @@ PROTOCOL_STDOUT_LOCK = threading.Lock()
 DRIVER_REQUIRED_METHODS = ("connect", "stop", "read")
 DRIVER_WRITE_METHOD = "write"
 CONTROLLER_REQUIRED_METHODS = ("compute",)
+NANOSECONDS_PER_MILLISECOND = 1_000_000
+NANOSECONDS_PER_SECOND = 1_000_000_000
+COMMAND_POLL_SLICE_NS = 50 * NANOSECONDS_PER_MILLISECOND
+FINE_SLEEP_WINDOW_NS = 5 * NANOSECONDS_PER_MILLISECOND
+ACTIVE_YIELD_WINDOW_NS = 500_000
 
 
 @dataclass
@@ -280,12 +285,12 @@ class PlantRuntimeEngine:
         self.paused = False
         self.should_exit = False
         self.cycle_id = 0
-        self.runtime_started_at: Optional[float] = None
-        self.first_cycle_started_at: Optional[float] = None
-        self.last_cycle_started_at: Optional[float] = None
-        self.next_cycle_deadline: Optional[float] = None
-        self.paused_started_at: Optional[float] = None
-        self.paused_duration_s = 0.0
+        self.runtime_started_at_ns: Optional[int] = None
+        self.first_cycle_started_at_ns: Optional[int] = None
+        self.last_cycle_started_at_ns: Optional[int] = None
+        self.next_cycle_deadline_ns: Optional[int] = None
+        self.paused_started_at_ns: Optional[int] = None
+        self.paused_duration_ns = 0
         self.controller_reload_version = 0
         self.controller_reload_results: "queue.Queue[ControllerReloadResult]" = queue.Queue()
 
@@ -301,12 +306,12 @@ class PlantRuntimeEngine:
         self.paused = False
         self.should_exit = False
         self.cycle_id = 0
-        self.runtime_started_at = None
-        self.first_cycle_started_at = None
-        self.last_cycle_started_at = None
-        self.next_cycle_deadline = None
-        self.paused_started_at = None
-        self.paused_duration_s = 0.0
+        self.runtime_started_at_ns = None
+        self.first_cycle_started_at_ns = None
+        self.last_cycle_started_at_ns = None
+        self.next_cycle_deadline_ns = None
+        self.paused_started_at_ns = None
+        self.paused_duration_ns = 0
         self.controller_reload_version = 0
 
     def start(self) -> None:
@@ -350,12 +355,49 @@ class PlantRuntimeEngine:
 
         self.running = True
         self.paused = False
-        now = time.monotonic()
-        if self.runtime_started_at is None:
-            self.runtime_started_at = now
-        self.first_cycle_started_at = None
-        self.next_cycle_deadline = now
-        self.last_cycle_started_at = None
+        now_ns = self._monotonic_ns()
+        if self.runtime_started_at_ns is None:
+            self.runtime_started_at_ns = now_ns
+        self.first_cycle_started_at_ns = None
+        self.next_cycle_deadline_ns = now_ns
+        self.last_cycle_started_at_ns = None
+
+    def _monotonic_ns(self) -> int:
+        return time.monotonic_ns()
+
+    def _sample_step_ns(self) -> int:
+        return max(1, self.sample_time_ms * NANOSECONDS_PER_MILLISECOND)
+
+    def _ns_to_seconds(self, value_ns: int) -> float:
+        return value_ns / NANOSECONDS_PER_SECOND
+
+    def _ns_to_milliseconds(self, value_ns: int) -> float:
+        return value_ns / NANOSECONDS_PER_MILLISECOND
+
+    def _sleep_until_cycle_deadline(self, deadline_ns: int) -> int:
+        while True:
+            now_ns = self._monotonic_ns()
+            remaining_ns = deadline_ns - now_ns
+            if remaining_ns <= 0:
+                return now_ns
+
+            if remaining_ns > FINE_SLEEP_WINDOW_NS:
+                sleep_ns = remaining_ns - FINE_SLEEP_WINDOW_NS
+                time.sleep(self._ns_to_seconds(sleep_ns))
+                continue
+
+            if remaining_ns > ACTIVE_YIELD_WINDOW_NS:
+                time.sleep(0)
+                continue
+
+            time.sleep(0)
+
+    def cycle_due(self) -> bool:
+        if self.should_exit or not self.running or self.paused:
+            return False
+        if self.next_cycle_deadline_ns is None:
+            return True
+        return self._monotonic_ns() >= self.next_cycle_deadline_ns
 
     def _stop_loaded_controllers(self, controllers: List[LoadedController]) -> None:
         for controller in controllers:
@@ -497,21 +539,21 @@ class PlantRuntimeEngine:
 
     def pause(self) -> None:
         if not self.paused:
-            self.paused_started_at = time.monotonic()
+            self.paused_started_at_ns = self._monotonic_ns()
         self.paused = True
-        self.next_cycle_deadline = None
-        self.last_cycle_started_at = None
+        self.next_cycle_deadline_ns = None
+        self.last_cycle_started_at_ns = None
 
     def resume(self) -> None:
-        if self.paused_started_at is not None:
-            paused_elapsed = max(0.0, time.monotonic() - self.paused_started_at)
-            self.paused_duration_s += paused_elapsed
-            if self.first_cycle_started_at is not None:
-                self.first_cycle_started_at += paused_elapsed
-            self.paused_started_at = None
+        if self.paused_started_at_ns is not None:
+            paused_elapsed_ns = max(0, self._monotonic_ns() - self.paused_started_at_ns)
+            self.paused_duration_ns += paused_elapsed_ns
+            if self.first_cycle_started_at_ns is not None:
+                self.first_cycle_started_at_ns += paused_elapsed_ns
+            self.paused_started_at_ns = None
         self.paused = False
-        self.next_cycle_deadline = time.monotonic() + (self.sample_time_ms / 1000.0)
-        self.last_cycle_started_at = None
+        self.next_cycle_deadline_ns = self._monotonic_ns() + self._sample_step_ns()
+        self.last_cycle_started_at_ns = None
 
     def update_setpoints(self, setpoints: Dict[str, float]) -> None:
         self.bootstrap.plant.apply_setpoints(setpoints)
@@ -541,41 +583,48 @@ class PlantRuntimeEngine:
             return 0.0
         if not self.running or self.paused:
             return None
-        if self.next_cycle_deadline is None:
+        if self.next_cycle_deadline_ns is None:
             return 0.0
-        return max(0.0, self.next_cycle_deadline - time.monotonic())
+        remaining_ns = max(0, self.next_cycle_deadline_ns - self._monotonic_ns())
+        if remaining_ns <= FINE_SLEEP_WINDOW_NS:
+            return 0.0
+        return self._ns_to_seconds(
+            min(COMMAND_POLL_SLICE_NS, remaining_ns - FINE_SLEEP_WINDOW_NS)
+        )
 
     def run_cycle(self) -> None:
         if not self.running or self.paused:
             return
 
-        if self.next_cycle_deadline is None:
-            self.next_cycle_deadline = time.monotonic()
+        if self.next_cycle_deadline_ns is None:
+            self.next_cycle_deadline_ns = self._monotonic_ns()
 
-        now = time.monotonic()
-        if now < self.next_cycle_deadline:
-            time.sleep(self.next_cycle_deadline - now)
-
-        cycle_started_at = time.monotonic()
+        cycle_started_at_ns = self._sleep_until_cycle_deadline(self.next_cycle_deadline_ns)
+        cycle_started_at = self._ns_to_seconds(cycle_started_at_ns)
         self.cycle_id += 1
-        if self.first_cycle_started_at is None:
-            self.first_cycle_started_at = cycle_started_at
-        effective_dt_ms = self._resolve_effective_dt_ms(cycle_started_at)
+        if self.first_cycle_started_at_ns is None:
+            self.first_cycle_started_at_ns = cycle_started_at_ns
+        effective_dt_ms = self._resolve_effective_dt_ms(cycle_started_at_ns)
 
         sensors, actuators_read, durations, controller_outputs, written_outputs = self._execute_cycle(
             cycle_started_at,
             effective_dt_ms,
         )
 
-        cycle_finished_at = time.monotonic()
-        cycle_duration_ms = (cycle_finished_at - cycle_started_at) * 1000.0
+        cycle_finished_at_ns = self._monotonic_ns()
+        cycle_duration_ms = self._ns_to_milliseconds(cycle_finished_at_ns - cycle_started_at_ns)
 
-        sample_step = self.sample_time_ms / 1000.0
-        planned_next_deadline = (self.next_cycle_deadline or cycle_started_at) + sample_step
-        late_by_ms = max(0.0, (cycle_finished_at - planned_next_deadline) * 1000.0)
+        sample_step_ns = self._sample_step_ns()
+        planned_next_deadline_ns = (
+            self.next_cycle_deadline_ns or cycle_started_at_ns
+        ) + sample_step_ns
+        late_by_ms = max(
+            0.0,
+            self._ns_to_milliseconds(cycle_finished_at_ns - planned_next_deadline_ns),
+        )
         cycle_late = late_by_ms > 0.0
 
-        publish_started_at = time.monotonic()
+        publish_started_at_ns = self._monotonic_ns()
         telemetry_payload = {
             "timestamp": time.time(),
             "cycle_id": self.cycle_id,
@@ -585,11 +634,14 @@ class PlantRuntimeEngine:
             "read_duration_ms": durations.read_duration_ms,
             "control_duration_ms": durations.control_duration_ms,
             "write_duration_ms": durations.write_duration_ms,
-            "publish_duration_ms": max(0.0, (time.monotonic() - publish_started_at) * 1000.0),
+            "publish_duration_ms": max(
+                0.0,
+                self._ns_to_milliseconds(self._monotonic_ns() - publish_started_at_ns),
+            ),
             "cycle_late": cycle_late,
             "late_by_ms": late_by_ms,
             "phase": "publish_telemetry",
-            "uptime_s": self._resolve_uptime_s(cycle_started_at),
+            "uptime_s": self._resolve_uptime_s(cycle_started_at_ns),
             "sensors": sensors,
             "actuators": written_outputs or actuators_read,
             "actuators_read": actuators_read,
@@ -612,11 +664,12 @@ class PlantRuntimeEngine:
                 },
             )
 
-        self.next_cycle_deadline = planned_next_deadline
-        while self.next_cycle_deadline < time.monotonic():
-            self.next_cycle_deadline += sample_step
+        self.next_cycle_deadline_ns = planned_next_deadline_ns
+        now_ns = self._monotonic_ns()
+        while self.next_cycle_deadline_ns < now_ns:
+            self.next_cycle_deadline_ns += sample_step_ns
 
-        self.last_cycle_started_at = cycle_started_at
+        self.last_cycle_started_at_ns = cycle_started_at_ns
 
     def _execute_cycle(
         self,
@@ -629,7 +682,7 @@ class PlantRuntimeEngine:
         written_outputs: ActuatorPayload = {}
         controller_durations: Dict[str, float] = {}
 
-        read_started_at = time.monotonic()
+        read_started_at_ns = self._monotonic_ns()
         try:
             if self.driver_instance is not None:
                 sensors, actuators_read = normalize_read_snapshot(
@@ -647,11 +700,11 @@ class PlantRuntimeEngine:
                     "plugin_name": self.bootstrap.driver.plugin_name,
                 },
             )
-        read_duration_ms = (time.monotonic() - read_started_at) * 1000.0
+        read_duration_ms = self._ns_to_milliseconds(self._monotonic_ns() - read_started_at_ns)
 
-        control_started_at = time.monotonic()
+        control_started_at_ns = self._monotonic_ns()
         for controller in self.controllers:
-            compute_started_at = time.monotonic()
+            compute_started_at_ns = self._monotonic_ns()
             try:
                 snapshot = build_controller_snapshot(
                     cycle_id=self.cycle_id,
@@ -687,12 +740,14 @@ class PlantRuntimeEngine:
                     },
                 )
             finally:
-                controller_durations[controller.metadata.id] = (
-                    time.monotonic() - compute_started_at
-                ) * 1000.0
-        control_duration_ms = (time.monotonic() - control_started_at) * 1000.0
+                controller_durations[controller.metadata.id] = self._ns_to_milliseconds(
+                    self._monotonic_ns() - compute_started_at_ns
+                )
+        control_duration_ms = self._ns_to_milliseconds(
+            self._monotonic_ns() - control_started_at_ns
+        )
 
-        write_started_at = time.monotonic()
+        write_started_at_ns = self._monotonic_ns()
         if controller_outputs and self.driver_instance is not None:
             try:
                 write_status = self.driver_instance.write(dict(controller_outputs))
@@ -713,7 +768,7 @@ class PlantRuntimeEngine:
                         "plugin_name": self.bootstrap.driver.plugin_name,
                     },
                 )
-        write_duration_ms = (time.monotonic() - write_started_at) * 1000.0
+        write_duration_ms = self._ns_to_milliseconds(self._monotonic_ns() - write_started_at_ns)
 
         return (
             sensors,
@@ -728,16 +783,24 @@ class PlantRuntimeEngine:
             written_outputs,
         )
 
-    def _resolve_effective_dt_ms(self, cycle_started_at: float) -> float:
-        if self.last_cycle_started_at is None:
+    def _resolve_effective_dt_ms(self, cycle_started_at_ns: int) -> float:
+        if self.last_cycle_started_at_ns is None:
             return float(self.sample_time_ms)
-        return max(0.0, (cycle_started_at - self.last_cycle_started_at) * 1000.0)
+        return max(
+            0.0,
+            self._ns_to_milliseconds(cycle_started_at_ns - self.last_cycle_started_at_ns),
+        )
 
-    def _resolve_uptime_s(self, cycle_started_at: float) -> float:
+    def _resolve_uptime_s(self, cycle_started_at_ns: int) -> float:
         if self.cycle_id == 1:
             return 0.0
-        first_cycle_started_at = self.first_cycle_started_at or cycle_started_at
-        return max(0.0, cycle_started_at - first_cycle_started_at)
+        first_cycle_started_at_ns = self.first_cycle_started_at_ns
+        if first_cycle_started_at_ns is None:
+            return 0.0
+        return max(
+            0.0,
+            self._ns_to_seconds(cycle_started_at_ns - first_cycle_started_at_ns),
+        )
 
     def stop(self) -> None:
         self._clear_pending_controller_reload_results()
@@ -1780,7 +1843,8 @@ def run() -> int:
                 break
 
             engine.apply_pending_controller_reload()
-            engine.run_cycle()
+            if engine.next_wait_timeout() == 0.0:
+                engine.run_cycle()
     finally:
         engine.stop()
 
