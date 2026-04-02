@@ -1,3 +1,5 @@
+import { appLogger } from '$lib/services/appLogger';
+
 function cloneState<T>(state: T): T {
   if (typeof structuredClone === 'function') {
     return structuredClone(state);
@@ -29,7 +31,7 @@ export function loadWorkspaceState<T>(
 
     return revive(JSON.parse(raw), fallbackState);
   } catch (error) {
-    console.error(`Erro ao carregar estado local (${storageKey}):`, error);
+    appLogger.error(`Erro ao carregar estado local (${storageKey}):`, error);
     return fallbackState;
   }
 }

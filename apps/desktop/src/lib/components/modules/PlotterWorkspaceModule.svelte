@@ -71,6 +71,7 @@
   import { createRuntimeTelemetryManager } from './plotter/runtimeTelemetry';
   import { getControllerActivationConflict } from '$lib/utils/controllerAssignments';
   import { buildContextSeriesControls, buildSeriesStyles, type SeriesStyle } from '$lib/utils/plotterSeries';
+  import { appLogger } from '$lib/services/appLogger';
   import PluginInstanceConfigModal from '../modals/PluginInstanceConfigModal.svelte';
 
   let { plants, activePlantId, theme, active = true, showControllerPanel = $bindable(false) } = $props();
@@ -367,7 +368,7 @@
         unsubscribe = cleanup;
       })
       .catch((error) => {
-        console.error('Falha ao registrar listeners de runtime da planta:', error);
+        appLogger.error('Falha ao registrar listeners de runtime da planta:', error);
       });
 
     return () => {
@@ -396,7 +397,7 @@
         });
       }
     } catch (e) {
-      console.error('Erro ao abrir planta:', e);
+      appLogger.error('Erro ao abrir planta:', e);
       showActionFailure(
         'Falha ao abrir planta',
         e instanceof Error ? e.message : undefined,
@@ -1044,7 +1045,7 @@
         });
       }
     } catch (error) {
-      console.error('Erro ao abrir arquivo arrastado:', error);
+      appLogger.error('Erro ao abrir arquivo arrastado:', error);
       showFeedbackModal({
         type: 'error',
         title: 'Falha ao abrir planta',

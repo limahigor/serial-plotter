@@ -6,10 +6,11 @@
     label: string;
     active?: boolean;
     collapsed?: boolean;
+    badgeCount?: number;
     onclick?: () => void;
   }
 
-  let { icon: Icon, label, active = false, collapsed = false, onclick }: Props = $props();
+  let { icon: Icon, label, active = false, collapsed = false, badgeCount = 0, onclick }: Props = $props();
 </script>
 
 <button
@@ -31,5 +32,13 @@
   </div>
   {#if !collapsed}
     <span class="text-sm font-medium truncate">{label}</span>
+  {/if}
+  {#if badgeCount > 0}
+    <span
+      class={`absolute rounded-full bg-rose-500 text-white text-[10px] font-semibold min-w-5 h-5 px-1 flex items-center justify-center shadow-sm ${collapsed ? 'right-1 top-1' : 'right-2 top-1/2 -translate-y-1/2'}`}
+      aria-label={`${badgeCount} alertas pendentes`}
+    >
+      {badgeCount > 99 ? '99+' : badgeCount}
+    </span>
   {/if}
 </button>

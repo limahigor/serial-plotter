@@ -4,7 +4,13 @@ use super::{
     SharedMetrics,
 };
 use crate::core::error::{AppError, AppResult};
+use crate::core::models::console::{
+    ConsoleLogInput, ConsoleLogLevel, ConsoleSourceKind, ConsoleSourceScope,
+};
+use crate::core::services::console::ConsoleService;
+use crate::state::ConsoleStore;
 use parking_lot::Mutex;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -48,7 +54,9 @@ pub(super) fn spawn_driver_process(
 
 pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
     app: AppHandle<R>,
+    console: Arc<ConsoleStore>,
     plant_id: String,
+    plant_name: String,
     runtime_id: String,
     configured_sample_time_ms: u64,
     stdout: ChildStdout,
@@ -67,6 +75,21 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
                         &runtime_id,
                         &format!("Falha ao ler stdout do driver: {error}"),
                     );
+                    append_plant_console_log(
+                        &app,
+                        console.as_ref(),
+                        &plant_id,
+                        &plant_name,
+                        &runtime_id,
+                        ConsoleLogLevel::Error,
+                        ConsoleSourceKind::Runtime,
+                        &format!("Falha ao ler stdout do driver: {error}"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     break;
                 }
             };
@@ -79,6 +102,21 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
                         &plant_id,
                         &runtime_id,
                         &format!("Mensagem inválida recebida do driver: {error}"),
+                    );
+                    append_plant_console_log(
+                        &app,
+                        console.as_ref(),
+                        &plant_id,
+                        &plant_name,
+                        &runtime_id,
+                        ConsoleLogLevel::Error,
+                        ConsoleSourceKind::Runtime,
+                        &format!("Mensagem inválida recebida do driver: {error}"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(json!({ "raw_line": line })),
                     );
                     continue;
                 }
@@ -105,10 +143,28 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
                     &app,
                     &plant_id,
                     &runtime_id,
+                    &plant_name,
                     configured_sample_time_ms,
                     &envelope.payload,
                     &handshake,
                     &metrics,
+                    console.as_ref(),
+                ),
+                "warning" => handle_runtime_warning_event(
+                    &app,
+                    console.as_ref(),
+                    &plant_id,
+                    &plant_name,
+                    &runtime_id,
+                    &envelope.payload,
+                ),
+                "log" => handle_runtime_log_event(
+                    &app,
+                    console.as_ref(),
+                    &plant_id,
+                    &plant_name,
+                    &runtime_id,
+                    &envelope.payload,
                 ),
                 "telemetry" => process_telemetry(
                     &app,
@@ -139,8 +195,11 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
     })
 }
 
-pub(super) fn spawn_stderr_task(
+pub(super) fn spawn_stderr_task<R: Runtime + 'static>(
+    app: AppHandle<R>,
+    console: Arc<ConsoleStore>,
     plant_id: String,
+    plant_name: String,
     runtime_id: String,
     stderr: ChildStderr,
 ) -> thread::JoinHandle<()> {
@@ -149,9 +208,145 @@ pub(super) fn spawn_stderr_task(
         for line in reader.lines().map_while(Result::ok) {
             if !line.trim().is_empty() {
                 eprintln!("[driver-runtime][plant={plant_id}][runtime={runtime_id}] {line}");
+                append_plant_console_log(
+                    &app,
+                    console.as_ref(),
+                    &plant_id,
+                    &plant_name,
+                    &runtime_id,
+                    infer_stderr_log_level(&line),
+                    ConsoleSourceKind::NativeOutput,
+                    &line,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(json!({
+                        "channel": "stderr",
+                        "classification": "external_output",
+                        "source_label": "EXTERNO"
+                    })),
+                );
             }
         }
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeConsolePayload {
+    #[serde(default)]
+    level: Option<ConsoleLogLevel>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    source_kind: Option<ConsoleSourceKind>,
+    #[serde(default)]
+    plugin_id: Option<String>,
+    #[serde(default)]
+    plugin_name: Option<String>,
+    #[serde(default)]
+    controller_id: Option<String>,
+    #[serde(default)]
+    controller_name: Option<String>,
+    #[serde(default)]
+    details: Option<Value>,
+}
+
+fn append_plant_console_log<R: Runtime>(
+    app: &AppHandle<R>,
+    console: &ConsoleStore,
+    plant_id: &str,
+    plant_name: &str,
+    runtime_id: &str,
+    level: ConsoleLogLevel,
+    source_kind: ConsoleSourceKind,
+    message: &str,
+    plugin_id: Option<String>,
+    plugin_name: Option<String>,
+    controller_id: Option<String>,
+    controller_name: Option<String>,
+    details: Option<Value>,
+) {
+    let _ = ConsoleService::append_log(
+        Some(app),
+        console,
+        ConsoleLogInput {
+            level,
+            message: message.to_string(),
+            source_scope: ConsoleSourceScope::Plant,
+            source_kind,
+            plant_id: Some(plant_id.to_string()),
+            plant_name: Some(plant_name.to_string()),
+            runtime_id: Some(runtime_id.to_string()),
+            plugin_id,
+            plugin_name,
+            controller_id,
+            controller_name,
+            details,
+        },
+    );
+}
+
+fn infer_stderr_log_level(_line: &str) -> ConsoleLogLevel {
+    ConsoleLogLevel::Debug
+}
+
+fn handle_runtime_warning_event<R: Runtime>(
+    app: &AppHandle<R>,
+    console: &ConsoleStore,
+    plant_id: &str,
+    plant_name: &str,
+    runtime_id: &str,
+    payload: &Value,
+) {
+    let payload = serde_json::from_value::<RuntimeConsolePayload>(payload.clone()).unwrap_or_default();
+    let message = payload
+        .message
+        .unwrap_or_else(|| "Aviso da runtime Python".to_string());
+    append_plant_console_log(
+        app,
+        console,
+        plant_id,
+        plant_name,
+        runtime_id,
+        payload.level.unwrap_or(ConsoleLogLevel::Warning),
+        payload.source_kind.unwrap_or(ConsoleSourceKind::Runtime),
+        &message,
+        payload.plugin_id,
+        payload.plugin_name,
+        payload.controller_id,
+        payload.controller_name,
+        payload.details,
+    );
+}
+
+fn handle_runtime_log_event<R: Runtime>(
+    app: &AppHandle<R>,
+    console: &ConsoleStore,
+    plant_id: &str,
+    plant_name: &str,
+    runtime_id: &str,
+    payload: &Value,
+) {
+    let payload = serde_json::from_value::<RuntimeConsolePayload>(payload.clone()).unwrap_or_default();
+    let message = payload
+        .message
+        .unwrap_or_else(|| "Log da runtime Python".to_string());
+    append_plant_console_log(
+        app,
+        console,
+        plant_id,
+        plant_name,
+        runtime_id,
+        payload.level.unwrap_or(ConsoleLogLevel::Info),
+        payload.source_kind.unwrap_or(ConsoleSourceKind::Runtime),
+        &message,
+        payload.plugin_id,
+        payload.plugin_name,
+        payload.controller_id,
+        payload.controller_name,
+        payload.details,
+    );
 }
 
 fn handle_ready_event<R: Runtime>(
@@ -218,11 +413,13 @@ fn handle_connected_event<R: Runtime>(
 fn handle_runtime_error_event<R: Runtime>(
     app: &AppHandle<R>,
     plant_id: &str,
+    plant_name: &str,
     runtime_id: &str,
     configured_sample_time_ms: u64,
     payload: &Value,
     handshake: &SharedHandshake,
     metrics: &SharedMetrics,
+    console: &ConsoleStore,
 ) {
     let message = payload
         .get("message")
@@ -249,6 +446,21 @@ fn handle_runtime_error_event<R: Runtime>(
             effective_dt_ms: lock.effective_dt_ms,
             cycle_late: lock.cycle_late,
         },
+    );
+    append_plant_console_log(
+        app,
+        console,
+        plant_id,
+        plant_name,
+        runtime_id,
+        ConsoleLogLevel::Error,
+        ConsoleSourceKind::Runtime,
+        &message,
+        None,
+        None,
+        None,
+        None,
+        Some(payload.clone()),
     );
     let _ = emit_error_event(app, plant_id, runtime_id, &message);
 }

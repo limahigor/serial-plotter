@@ -426,7 +426,7 @@ class RunnerContractTests(unittest.TestCase):
             bootstrap = self.build_bootstrap(Path(tmp_dir))
             context = runner.build_driver_plugin_context(bootstrap)
 
-        self.assertEqual(set(vars(context).keys()), {"config", "plant"})
+        self.assertEqual(set(vars(context).keys()), {"config", "plant", "logger"})
         self.assertFalse(hasattr(context, "runtime"))
 
     def test_controller_context_uses_minimum_public_shape(self) -> None:
@@ -435,9 +435,10 @@ class RunnerContractTests(unittest.TestCase):
             context = runner.build_controller_plugin_context(
                 bootstrap.controllers[0],
                 bootstrap.plant,
+                bootstrap.runtime.id,
             )
 
-        self.assertEqual(set(vars(context).keys()), {"controller", "plant"})
+        self.assertEqual(set(vars(context).keys()), {"controller", "plant", "logger"})
         self.assertFalse(hasattr(context, "runtime"))
         self.assertEqual(
             set(vars(context.controller).keys()),
@@ -490,12 +491,15 @@ class RunnerContractTests(unittest.TestCase):
 
                 driver_instance = engine.driver_instance
                 self.assertIsNotNone(driver_instance)
-                self.assertEqual(driver_instance.context_keys, {"config", "plant"})
+                self.assertEqual(driver_instance.context_keys, {"config", "plant", "logger"})
                 self.assertFalse(hasattr(driver_instance.context, "runtime"))
 
                 self.assertEqual(len(engine.controllers), 1)
                 controller_instance = engine.controllers[0].instance
-                self.assertEqual(controller_instance.context_keys, {"controller", "plant"})
+                self.assertEqual(
+                    controller_instance.context_keys,
+                    {"controller", "plant", "logger"},
+                )
                 self.assertFalse(hasattr(controller_instance.context, "runtime"))
                 self.assertEqual(
                     controller_instance.controller_keys,
@@ -510,6 +514,36 @@ class RunnerContractTests(unittest.TestCase):
                 )
             finally:
                 engine.stop()
+
+    def test_runtime_logger_emits_structured_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bootstrap = self.build_bootstrap(Path(tmp_dir))
+            driver_context = runner.build_driver_plugin_context(bootstrap)
+            controller_context = runner.build_controller_plugin_context(
+                bootstrap.controllers[0],
+                bootstrap.plant,
+                bootstrap.runtime.id,
+            )
+
+        with patch.object(runner, "emit") as emit_mock:
+            driver_context.logger.info("driver ok", {"phase": "connect"})
+            controller_context.logger.warning("controller late", {"dt_ms": 125.0})
+
+        self.assertEqual(emit_mock.call_count, 2)
+        first_call = emit_mock.call_args_list[0]
+        self.assertEqual(first_call.args[0], "log")
+        self.assertEqual(first_call.args[1]["level"], "info")
+        self.assertEqual(first_call.args[1]["source_kind"], "driver")
+        self.assertEqual(first_call.args[1]["plugin_id"], bootstrap.driver.plugin_id)
+        self.assertEqual(first_call.args[1]["details"], {"phase": "connect"})
+
+        second_call = emit_mock.call_args_list[1]
+        self.assertEqual(second_call.args[1]["level"], "warning")
+        self.assertEqual(second_call.args[1]["source_kind"], "controller")
+        self.assertEqual(
+            second_call.args[1]["controller_id"],
+            bootstrap.controllers[0].id,
+        )
 
     def test_engine_enriches_legacy_controller_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

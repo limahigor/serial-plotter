@@ -1,3 +1,4 @@
+pub mod console;
 pub mod plant;
 pub mod plant_open;
 pub mod plugin;

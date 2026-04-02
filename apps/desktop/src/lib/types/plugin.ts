@@ -163,12 +163,14 @@ class ${className}:
         # Contrato atual:
         # - context.config -> configuração do driver
         # - context.plant -> planta, sensores, atuadores e setpoints
+        # - context.logger -> logger estruturado (debug/info/warning/error)
         self.context = context
 
     def connect(self) -> bool:
         # Exemplos uteis:
         # port = self.context.config.get("port")
         # sensor_ids = self.context.plant.sensors.ids
+        # self.context.logger.info("Driver conectando", {"port": port})
         return True
 
     def stop(self) -> bool:
@@ -206,6 +208,7 @@ class ${className}:
         # Contrato atual:
         # - context.controller -> id, nome, tipo, bindings e parametros
         # - context.plant -> variaveis, sensores, atuadores e setpoints
+        # - context.logger -> logger estruturado (debug/info/warning/error)
         self.context = context
 
     def compute(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
@@ -218,6 +221,7 @@ class ${className}:
         #
         # Retorne apenas saidas por variable_id de atuador.
         outputs: Dict[str, float] = {}
+        # self.context.logger.debug("Calculando controlador", {"controller": self.context.controller.name})
         for actuator_id in self.context.controller.output_variable_ids:
             outputs[actuator_id] = 0.0
         return outputs

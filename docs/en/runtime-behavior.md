@@ -29,6 +29,7 @@ Important behavior:
 - the runner duplicates the original `stdout` descriptor for protocol writes
 - Python `print()` output is redirected to `stderr`
 - common native library `stdout` output is also redirected to `stderr`
+- `context.logger` in drivers/controllers emits structured log events for the Console module
 
 ## Live Runtime Rules
 
@@ -152,4 +153,5 @@ The Python runner script is stored under the shared runtimes area and reused acr
 
 - Python errors and logs arrive on `stderr`
 - the backend echoes `stderr` lines with the `driver-runtime` prefix
+- structured driver/controller logs are also forwarded to the Console
 - if a native library bypasses the process handles entirely, protocol corruption is still theoretically possible, but it is no longer the common case for ordinary `printf`-style output

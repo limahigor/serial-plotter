@@ -118,7 +118,14 @@ pub fn connect_plant(
 ) -> Result<PlantResponse, ErrorDto> {
     into_plant_response(
         state.runtimes(),
-        DriverRuntimeService::connect(&app, state.plants(), state.plugins(), state.runtimes(), &id),
+        DriverRuntimeService::connect(
+            &app,
+            state.plants(),
+            state.plugins(),
+            state.runtimes(),
+            state.console_handle(),
+            &id,
+        ),
     )
 }
 

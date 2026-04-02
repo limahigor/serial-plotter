@@ -111,6 +111,8 @@ Exemplo:
 Em runtime:
 
 - drivers recebem `context.config` e `context.plant`
+- drivers também recebem `context.logger`
 - controladores recebem `context.controller` e `context.plant`
+- controladores também recebem `context.logger`
 - controladores não recebem objetos internos de backend/runtime
 - parâmetros do controlador chegam como objetos com campos como `.type`, `.value` e `.label`

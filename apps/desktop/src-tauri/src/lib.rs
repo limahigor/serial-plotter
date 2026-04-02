@@ -3,6 +3,10 @@ mod commands;
 mod core;
 mod state;
 
+use crate::commands::console::{
+    append_console_log, clear_console_logs, delete_console_alert_rule, get_console_overview,
+    list_console_logs, mark_console_alerts_read, save_console_alert_rule,
+};
 use crate::commands::plants::{
     close_plant, connect_plant, create_plant, disconnect_plant, get_plant, list_plants,
     open_plant_file, pause_plant, remove_controller, remove_plant, resume_plant, save_controller,
@@ -41,6 +45,13 @@ pub fn run() {
             remove_controller,
             save_setpoint,
             save_export_file,
+            get_console_overview,
+            list_console_logs,
+            append_console_log,
+            save_console_alert_rule,
+            delete_console_alert_rule,
+            mark_console_alerts_read,
+            clear_console_logs,
             create_plugin,
             delete_plugin,
             get_plugin,

@@ -29,6 +29,7 @@ Comportamento importante:
 - o runner duplica o descritor original de `stdout` para escrever o protocolo
 - `print()` em Python vai para `stderr`
 - saída comum de `stdout` de bibliotecas nativas também é desviada para `stderr`
+- `context.logger` em drivers/controladores emite logs estruturados para o módulo Console
 
 ## Regras da Runtime ao Vivo
 
@@ -152,4 +153,5 @@ O script Python do runner fica na área compartilhada de runtimes e é reutiliza
 
 - erros e logs Python chegam por `stderr`
 - o backend ecoa linhas de `stderr` com o prefixo `driver-runtime`
+- logs estruturados de driver/controlador também são encaminhados para o Console
 - se uma biblioteca nativa bypassar completamente os handles do processo, ainda existe possibilidade teórica de corrupção do protocolo, mas esse deixou de ser o caso comum para saídas estilo `printf`

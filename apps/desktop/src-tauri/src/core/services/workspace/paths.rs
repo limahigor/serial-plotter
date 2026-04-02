@@ -12,8 +12,12 @@ const CONTROLLERS_DIR: &str = "controllers";
 const PLANTS_DIR: &str = "plants";
 const ENVS_DIR: &str = "envs";
 const RUNTIMES_DIR: &str = "runtimes";
+const CONSOLE_DIR: &str = "console";
+const CONSOLE_LOGS_DIR: &str = "logs";
 pub(super) const REGISTRY_FILE: &str = "registry.json";
 pub(super) const SOURCE_FILE: &str = "main.py";
+pub(super) const CONSOLE_ALERTS_FILE: &str = "alerts.json";
+pub(super) const CONSOLE_STATE_FILE: &str = "state.json";
 
 pub(super) fn plugin_directory(plugin_name: &str, plugin_type: PluginType) -> AppResult<PathBuf> {
     let plugin_root = plugin_root_directory(plugin_type)?;
@@ -59,6 +63,22 @@ pub(super) fn runtime_directory(runtime_id: &str) -> AppResult<PathBuf> {
     let runtime_id =
         crate::core::services::workspace::ensure_safe_workspace_component(runtime_id, "runtime")?;
     Ok(runtime_root_directory()?.join(runtime_id))
+}
+
+pub(super) fn console_root_directory() -> AppResult<PathBuf> {
+    Ok(workspace_root()?.join(CONSOLE_DIR))
+}
+
+pub(super) fn console_logs_directory() -> AppResult<PathBuf> {
+    Ok(console_root_directory()?.join(CONSOLE_LOGS_DIR))
+}
+
+pub(super) fn console_alerts_path() -> AppResult<PathBuf> {
+    Ok(console_root_directory()?.join(CONSOLE_ALERTS_FILE))
+}
+
+pub(super) fn console_state_path() -> AppResult<PathBuf> {
+    Ok(console_root_directory()?.join(CONSOLE_STATE_FILE))
 }
 
 #[cfg(not(test))]
