@@ -46,8 +46,10 @@
   let tailLocked = $state(true);
   let selectedEntryId = $state<string | null>(null);
   let selectedEntrySnapshot = $state<ConsoleLogEntry | null>(null);
+  let copyFeedback = $state<'idle' | 'success' | 'error'>('idle');
   let showSidePanel = $state(true);
   let liveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let copyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   let tailScrollFrame = 0;
   let forceTailScroll = false;
   let pendingLiveEntries: ConsoleLogEntry[] = [];
@@ -263,20 +265,114 @@
     return `[${tags.join(' · ')}]`;
   }
 
+  function resetCopyFeedback() {
+    copyFeedback = 'idle';
+    if (!copyFeedbackTimer) {
+      return;
+    }
+
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+
+  function setCopyFeedback(status: 'success' | 'error') {
+    resetCopyFeedback();
+    copyFeedback = status;
+    copyFeedbackTimer = setTimeout(() => {
+      copyFeedback = 'idle';
+      copyFeedbackTimer = null;
+    }, 2200);
+  }
+
+  async function writeToClipboard(value: string) {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+
+    if (typeof document === 'undefined') {
+      throw new Error('Clipboard indisponível');
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+
+    if (!copied) {
+      throw new Error('Falha ao copiar log');
+    }
+  }
+
+  function formatEntryForClipboard(entry: ConsoleLogEntry) {
+    const lines = [
+      `Hora: ${formatReadableDateTime(entry.timestamp)}`,
+      `Nivel: ${entry.level}`,
+      `Origem: ${terminalOriginLabel(entry.sourceKind)}`,
+    ];
+
+    if (entry.sourceScope === 'app') {
+      lines.push('Escopo: App');
+    } else if (entry.plantName) {
+      lines.push(`Escopo: Planta (${entry.plantName})`);
+    } else {
+      lines.push('Escopo: Planta');
+    }
+
+    const meta = formatInlineMeta(entry);
+    if (meta) {
+      lines.push(`Metadados: ${meta}`);
+    }
+
+    lines.push(`Mensagem: ${entry.message}`);
+
+    if (entry.details !== null && entry.details !== undefined) {
+      lines.push('');
+      lines.push('Detalhes:');
+      lines.push(formatEntryDetails(entry.details));
+    }
+
+    return lines.join('\n');
+  }
+
+  async function copySelectedEntryToClipboard() {
+    if (!selectedEntry) {
+      return;
+    }
+
+    try {
+      await writeToClipboard(formatEntryForClipboard(selectedEntry));
+      setCopyFeedback('success');
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : 'Falha ao copiar log';
+      setCopyFeedback('error');
+    }
+  }
+
   function selectEntry(entry: ConsoleLogEntry) {
     if (selectedEntryId === entry.id) {
       selectedEntryId = null;
       selectedEntrySnapshot = null;
+      resetCopyFeedback();
       return;
     }
 
     selectedEntryId = entry.id;
     selectedEntrySnapshot = entry;
+    resetCopyFeedback();
   }
 
   function closeInspector() {
     selectedEntryId = null;
     selectedEntrySnapshot = null;
+    resetCopyFeedback();
   }
 
   function describeTarget(target: ConsoleAlertTarget) {
@@ -575,6 +671,7 @@
       if (loadDebounce) {
         clearTimeout(loadDebounce);
       }
+      resetCopyFeedback();
       cancelLiveFlush();
       cancelTailScroll();
     };
@@ -794,15 +891,25 @@
               <div class={isLightTheme ? 'text-[10px] uppercase tracking-[0.12em] text-slate-400' : 'text-[10px] uppercase tracking-[0.12em] text-zinc-500'}>
                 inspector
               </div>
-              <button
-                type="button"
-                class={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition ${isLightTheme ? 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-100'}`}
-                onclick={closeInspector}
-                title="Fechar inspector"
-                aria-label="Fechar inspector"
-              >
-                <X size={14} />
-              </button>
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  class={`inline-flex h-7 items-center justify-center rounded-md border px-2 text-[10px] font-medium uppercase tracking-[0.08em] transition ${copyFeedback === 'success' ? 'border-emerald-500 bg-emerald-500 text-white hover:bg-emerald-500' : copyFeedback === 'error' ? 'border-rose-500 bg-rose-500 text-white hover:bg-rose-500' : isLightTheme ? 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-100'}`}
+                  onclick={copySelectedEntryToClipboard}
+                  title="Copiar log"
+                >
+                  {copyFeedback === 'success' ? 'Copiado' : copyFeedback === 'error' ? 'Falhou' : 'Copy'}
+                </button>
+                <button
+                  type="button"
+                  class={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition ${isLightTheme ? 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-100'}`}
+                  onclick={closeInspector}
+                  title="Fechar inspector"
+                  aria-label="Fechar inspector"
+                >
+                  <X size={14} />
+                </button>
+              </div>
             </div>
             <div class={`mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] uppercase ${isLightTheme ? 'text-slate-500' : 'text-zinc-500'}`}>
               <span>{formatTerminalTimestamp(selectedEntry.timestamp)}</span>
