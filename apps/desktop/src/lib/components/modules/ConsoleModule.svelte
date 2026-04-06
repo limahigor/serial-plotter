@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { ChevronsRight, Sliders } from 'lucide-svelte';
-  import { onMount, tick } from 'svelte';
+  import { ChevronsRight, Sliders, X } from 'lucide-svelte';
+  import { onMount } from 'svelte';
   import { appStore } from '$lib/stores/data.svelte';
   import { consoleStore } from '$lib/stores/consoleStore.svelte';
   import { listConsoleLogs } from '$lib/services/console';
@@ -21,7 +21,8 @@
   }
 
   const LEVELS: ConsoleLogLevel[] = ['debug', 'info', 'warning', 'error'];
-  const MAX_VISIBLE_ENTRIES = 200;
+  const MAX_VISIBLE_ENTRIES = 120;
+  const LIVE_RENDER_INTERVAL_MS = 72;
   const TAIL_LOCK_THRESHOLD = 28;
   const ALERT_TARGETS: Array<{ value: ConsoleAlertTarget['type']; label: string }> = [
     { value: 'app', label: 'Somente app' },
@@ -34,7 +35,8 @@
   let entries = $state<ConsoleLogEntry[]>([]);
   let loading = $state(false);
   let errorMessage = $state<string | null>(null);
-  let search = $state('');
+  let searchDraft = $state('');
+  let appliedSearch = $state('');
   let selectedLevels = $state<ConsoleLogLevel[]>([]);
   let scopeFilter = $state<'all' | 'app' | 'plant'>('all');
   let selectedPlantId = $state('');
@@ -42,8 +44,13 @@
   let requestSequence = 0;
   let logViewport: HTMLDivElement | null = $state(null);
   let tailLocked = $state(true);
-  let expandedDetailIds = $state<string[]>([]);
+  let selectedEntryId = $state<string | null>(null);
+  let selectedEntrySnapshot = $state<ConsoleLogEntry | null>(null);
   let showSidePanel = $state(true);
+  let liveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let tailScrollFrame = 0;
+  let forceTailScroll = false;
+  let pendingLiveEntries: ConsoleLogEntry[] = [];
 
   let editingRuleId = $state<string | null>(null);
   let ruleName = $state('');
@@ -54,9 +61,16 @@
   let savingRule = $state(false);
 
   const rules = $derived(consoleStore.rules);
-  const normalizedSearch = $derived(search.trim().toLowerCase());
+  const normalizedSearch = $derived(appliedSearch.trim().toLowerCase());
   const enabledRulesCount = $derived.by(() => rules.filter((rule) => rule.enabled).length);
   const isLightTheme = $derived(theme === 'light');
+  const selectedEntry = $derived.by(() => {
+    if (!selectedEntryId) {
+      return null;
+    }
+
+    return entries.find((entry) => entry.id === selectedEntryId) ?? selectedEntrySnapshot;
+  });
 
   const plantOptions = $derived.by<ConsolePlantOption[]>(() => {
     const merged = new Map<string, string>();
@@ -240,14 +254,29 @@
     }
   }
 
-  function isEntryDetailsExpanded(entryId: string) {
-    return expandedDetailIds.includes(entryId);
+  function formatInlineMeta(entry: ConsoleLogEntry) {
+    const tags = entryMetaTags(entry);
+    if (tags.length === 0) {
+      return '';
+    }
+
+    return `[${tags.join(' · ')}]`;
   }
 
-  function toggleEntryDetails(entryId: string) {
-    expandedDetailIds = expandedDetailIds.includes(entryId)
-      ? expandedDetailIds.filter((id) => id !== entryId)
-      : [...expandedDetailIds, entryId];
+  function selectEntry(entry: ConsoleLogEntry) {
+    if (selectedEntryId === entry.id) {
+      selectedEntryId = null;
+      selectedEntrySnapshot = null;
+      return;
+    }
+
+    selectedEntryId = entry.id;
+    selectedEntrySnapshot = entry;
+  }
+
+  function closeInspector() {
+    selectedEntryId = null;
+    selectedEntrySnapshot = null;
   }
 
   function describeTarget(target: ConsoleAlertTarget) {
@@ -302,12 +331,29 @@
     return true;
   }
 
-  async function scrollToTail(force = false) {
-    if (!logViewport) return;
-    if (!force && !tailLocked) return;
+  function cancelTailScroll() {
+    if (tailScrollFrame) {
+      cancelAnimationFrame(tailScrollFrame);
+      tailScrollFrame = 0;
+    }
+    forceTailScroll = false;
+  }
 
-    await tick();
-    logViewport.scrollTop = logViewport.scrollHeight;
+  function scheduleTailScroll(force = false) {
+    if (!logViewport) return;
+    if (force) {
+      forceTailScroll = true;
+    }
+    if (!forceTailScroll && !tailLocked) return;
+    if (tailScrollFrame) return;
+
+    tailScrollFrame = requestAnimationFrame(() => {
+      tailScrollFrame = 0;
+      const shouldScroll = forceTailScroll || tailLocked;
+      forceTailScroll = false;
+      if (!logViewport || !shouldScroll) return;
+      logViewport.scrollTop = logViewport.scrollHeight;
+    });
   }
 
   function handleViewportScroll() {
@@ -318,28 +364,80 @@
     tailLocked = distanceToBottom <= TAIL_LOCK_THRESHOLD;
   }
 
+  function applyEntries(nextEntries: ConsoleLogEntry[]) {
+    entries = nextEntries;
+
+    if (!selectedEntryId) {
+      return;
+    }
+
+    const updatedSelectedEntry = nextEntries.find((entry) => entry.id === selectedEntryId);
+    if (updatedSelectedEntry) {
+      selectedEntrySnapshot = updatedSelectedEntry;
+    }
+  }
+
+  function cancelLiveFlush() {
+    if (!liveFlushTimer) return;
+    clearTimeout(liveFlushTimer);
+    liveFlushTimer = null;
+  }
+
+  function flushPendingLiveEntries() {
+    liveFlushTimer = null;
+
+    if (pendingLiveEntries.length === 0) {
+      return;
+    }
+
+    const visibleEntries = pendingLiveEntries.filter((entry) => matchesCurrentFilters(entry));
+    pendingLiveEntries = [];
+    if (visibleEntries.length === 0) {
+      return;
+    }
+
+    applyEntries([...entries, ...visibleEntries].slice(-MAX_VISIBLE_ENTRIES));
+    scheduleTailScroll();
+  }
+
+  function queueLiveEntries(batch: ConsoleLogEntry[]) {
+    if (batch.length === 0) {
+      return;
+    }
+
+    pendingLiveEntries.push(...batch);
+    if (liveFlushTimer) {
+      return;
+    }
+
+    liveFlushTimer = setTimeout(() => {
+      flushPendingLiveEntries();
+    }, LIVE_RENDER_INTERVAL_MS);
+  }
+
   async function loadEntries() {
     if (!active) return;
 
     const currentRequest = ++requestSequence;
     loading = true;
     errorMessage = null;
+    pendingLiveEntries = [];
+    cancelLiveFlush();
 
     try {
       const response = await listConsoleLogs({
         levels: selectedLevels,
         sourceScope: scopeFilter === 'all' ? undefined : scopeFilter,
         plantId: scopeFilter === 'plant' ? selectedPlantId || undefined : undefined,
-        search,
+        search: appliedSearch,
         limit: MAX_VISIBLE_ENTRIES,
       });
 
       if (currentRequest !== requestSequence) return;
 
       const nextEntries = [...response].reverse();
-      entries = nextEntries;
-      expandedDetailIds = expandedDetailIds.filter((id) => nextEntries.some((entry) => entry.id === id));
-      await scrollToTail(true);
+      applyEntries(nextEntries);
+      scheduleTailScroll(true);
     } catch (error) {
       if (currentRequest !== requestSequence) return;
       errorMessage = error instanceof Error ? error.message : 'Erro ao carregar logs do console';
@@ -356,8 +454,24 @@
     }
 
     loadDebounce = setTimeout(() => {
+      loadDebounce = null;
       void loadEntries();
     }, delay);
+  }
+
+  function applySearch() {
+    appliedSearch = searchDraft;
+    tailLocked = true;
+    scheduleLoad(0);
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Enter') {
+      return;
+    }
+
+    event.preventDefault();
+    applySearch();
   }
 
   function toggleFilterLevel(level: ConsoleLogLevel) {
@@ -448,8 +562,7 @@
 
     try {
       await consoleStore.clearLogs();
-      entries = [];
-      expandedDetailIds = [];
+      applyEntries([]);
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'Erro ao limpar logs';
     }
@@ -458,39 +571,51 @@
   onMount(() => {
     void consoleStore.initialize();
 
-    const unsubscribeEntries = consoleStore.subscribeEntries(async (entry) => {
-      if (!active || !matchesCurrentFilters(entry)) {
-        return;
-      }
-
-      entries = [...entries.filter((item) => item.id !== entry.id), entry].slice(-MAX_VISIBLE_ENTRIES);
-      await scrollToTail();
-    });
-
     return () => {
-      unsubscribeEntries();
       if (loadDebounce) {
         clearTimeout(loadDebounce);
       }
+      cancelLiveFlush();
+      cancelTailScroll();
     };
   });
 
   $effect(() => {
     if (!active) return;
+
+    const unsubscribeEntries = consoleStore.subscribeEntries((batch) => {
+      queueLiveEntries(batch);
+    });
+
+    return () => {
+      unsubscribeEntries();
+    };
+  });
+
+  $effect(() => {
+    if (active) return;
+    pendingLiveEntries = [];
+    cancelLiveFlush();
+    cancelTailScroll();
+    if (loadDebounce) {
+      clearTimeout(loadDebounce);
+      loadDebounce = null;
+    }
+  });
+
+  $effect(() => {
+    if (!active) return;
     tailLocked = true;
-    void loadEntries();
+    scheduleLoad(0);
   });
 </script>
 
-<div class="flex h-full min-h-0 flex-col bg-slate-50 dark:bg-zinc-950">
+<div class="flex h-full min-h-0 flex-col overflow-hidden bg-slate-50 dark:bg-zinc-950">
   <header class="flex-shrink-0 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur dark:border-white/5 dark:bg-zinc-900/90 sm:px-5">
-    <div class="mx-auto flex w-full max-w-[1440px] flex-col gap-2.5">
+    <div class="flex w-full flex-col gap-2.5">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 class="text-base font-semibold text-slate-800 dark:text-white">Console</h1>
-          <p class="text-[11px] text-slate-500 dark:text-zinc-400">
-            Logs centralizados com leitura enxuta e fluxo contínuo.
-          </p>
         </div>
 
         <div class="flex flex-wrap gap-2">
@@ -525,10 +650,10 @@
 
       <div class="grid gap-2 lg:grid-cols-[minmax(0,1fr)_200px_auto]">
         <input
-          bind:value={search}
-          oninput={() => scheduleLoad(180)}
+          bind:value={searchDraft}
+          onkeydown={handleSearchKeydown}
           class="h-9 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-500"
-          placeholder="Buscar por mensagem, planta, plugin ou controlador"
+          placeholder="Buscar por mensagem, planta, plugin ou controlador (Enter para aplicar)"
         />
 
         <select
@@ -597,14 +722,14 @@
     </div>
   </header>
 
-  <div class="flex-1 min-h-0 overflow-auto px-3 py-3 sm:px-5 xl:overflow-hidden">
-    <div class={`mx-auto flex h-full min-h-0 max-w-[1440px] flex-col gap-3 xl:flex-row ${showSidePanel ? 'xl:gap-3' : 'xl:gap-0'}`}>
-      <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm dark:border-white/10 dark:bg-zinc-900">
+  <div class="flex-1 min-h-0 overflow-hidden">
+    <div class={`flex h-full min-h-0 flex-col xl:flex-row ${showSidePanel ? 'xl:gap-0' : 'xl:gap-0'}`}>
+      <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-t border-slate-200 bg-white dark:border-white/10 dark:bg-zinc-900 xl:border-r">
         <div class={`border-b px-3 py-1.5 font-mono text-[10px] ${isLightTheme ? 'border-slate-200 bg-slate-100 text-slate-500' : 'border-white/10 bg-[#111318] text-zinc-500'}`}>
           <span class={isLightTheme ? 'text-emerald-600' : 'text-emerald-400'}>$</span>
           <span class="ml-2">console --follow --limit {MAX_VISIBLE_ENTRIES}</span>
           {#if normalizedSearch}
-            <span class={isLightTheme ? 'text-slate-400' : 'text-zinc-600'}> | grep -i "{search.trim()}"</span>
+            <span class={isLightTheme ? 'text-slate-400' : 'text-zinc-600'}> | grep -i "{appliedSearch.trim()}"</span>
           {/if}
         </div>
 
@@ -616,9 +741,8 @@
 
         <div
           bind:this={logViewport}
-          class={`min-h-0 flex-1 overflow-auto font-mono text-[12px] ${isLightTheme ? 'bg-[#fcfcfb] text-slate-700' : 'bg-[#0d1117] text-zinc-200'}`}
-          role="log"
-          aria-live="polite"
+          class={`min-h-0 flex-1 overflow-auto font-mono text-[12px] [scrollbar-gutter:stable] ${isLightTheme ? 'bg-[#fcfcfb] text-slate-700' : 'bg-[#0d1117] text-zinc-200'}`}
+          aria-live="off"
           onscroll={handleViewportScroll}
         >
           {#if loading && entries.length === 0}
@@ -630,50 +754,72 @@
               nenhum log encontrado.
             </div>
           {:else}
-            <div class={`sticky top-0 z-10 grid grid-cols-[88px_60px_84px_minmax(0,1fr)] gap-2.5 border-b px-3 py-1.5 text-[10px] uppercase tracking-[0.12em] backdrop-blur ${isLightTheme ? 'border-slate-200 bg-[#f2f4f7]/95 text-slate-400' : 'border-white/10 bg-[#13171d]/95 text-zinc-500'}`}>
-              <span>hora</span>
-              <span>nível</span>
-              <span>origem</span>
-              <span>mensagem</span>
+            <div class="flex min-h-full flex-col justify-end">
+              <div class={`grid grid-cols-[88px_58px_86px_minmax(0,1fr)] gap-2 border-b px-3 py-1.5 text-[10px] uppercase tracking-[0.12em] ${isLightTheme ? 'border-slate-200 bg-[#f2f4f7] text-slate-400' : 'border-white/10 bg-[#13171d] text-zinc-500'}`}>
+                <span>hora</span>
+                <span>nível</span>
+                <span>origem</span>
+                <span>mensagem</span>
+              </div>
+
+              {#each entries as entry (entry.id)}
+                <button
+                  type="button"
+                  class={`grid w-full grid-cols-[88px_58px_86px_minmax(0,1fr)] gap-2 border-b px-3 py-1.5 text-left transition ${selectedEntryId === entry.id ? (isLightTheme ? 'bg-slate-100/90' : 'bg-white/[0.05]') : ''} ${isLightTheme ? 'border-slate-100 hover:bg-slate-50/80' : 'border-white/5 hover:bg-white/[0.02]'}`}
+                  onclick={() => selectEntry(entry)}
+                >
+                  <div class={isLightTheme ? 'truncate text-slate-400' : 'truncate text-zinc-500'}>
+                    {formatTerminalTimestamp(entry.timestamp)}
+                  </div>
+                  <div class={`truncate uppercase ${levelClass(entry.level)}`}>{entry.level}</div>
+                  <div class={`truncate uppercase ${originClass(entry.sourceKind)}`}>{terminalOriginLabel(entry.sourceKind)}</div>
+
+                  <div class={`min-w-0 truncate leading-[1.35] ${messageClass(entry)}`}>
+                    <span>{entry.message}</span>
+                    {#if formatInlineMeta(entry)}
+                      <span class={isLightTheme ? 'ml-2 text-[10px] text-slate-400' : 'ml-2 text-[10px] text-zinc-500'}>
+                        {formatInlineMeta(entry)}
+                      </span>
+                    {/if}
+                  </div>
+                </button>
+              {/each}
             </div>
-
-            {#each entries as entry (entry.id)}
-              <article class={`grid grid-cols-[88px_60px_84px_minmax(0,1fr)] gap-2.5 border-b px-3 py-1.5 ${isLightTheme ? 'border-slate-100 hover:bg-slate-50/80' : 'border-white/5 hover:bg-white/[0.02]'}`}>
-                <div class={isLightTheme ? 'truncate text-slate-400' : 'truncate text-zinc-500'}>
-                  {formatTerminalTimestamp(entry.timestamp)}
-                </div>
-                <div class={`truncate uppercase ${levelClass(entry.level)}`}>{entry.level}</div>
-                <div class={`truncate uppercase ${originClass(entry.sourceKind)}`}>{terminalOriginLabel(entry.sourceKind)}</div>
-
-                <div class="min-w-0">
-                  <div class={`whitespace-pre-wrap break-words leading-[1.35] ${messageClass(entry)}`}>{entry.message}</div>
-
-                  {#if entryMetaTags(entry).length > 0}
-                    <div class={isLightTheme ? 'mt-0.5 truncate text-[10px] text-slate-400' : 'mt-0.5 truncate text-[10px] text-zinc-500'}>
-                      {entryMetaTags(entry).join(' · ')}
-                    </div>
-                  {/if}
-
-                  {#if entry.details}
-                    <div class="mt-0.5">
-                      <button
-                        type="button"
-                        class={isLightTheme ? 'text-[10px] uppercase tracking-[0.12em] text-slate-400 transition hover:text-slate-700' : 'text-[10px] uppercase tracking-[0.12em] text-zinc-500 transition hover:text-zinc-300'}
-                        onclick={() => toggleEntryDetails(entry.id)}
-                      >
-                        {isEntryDetailsExpanded(entry.id) ? 'ocultar detalhes' : 'ver detalhes'}
-                      </button>
-
-                      {#if isEntryDetailsExpanded(entry.id)}
-                        <pre class={`mt-1 overflow-auto rounded-lg border px-2 py-1.5 text-[10px] leading-4 ${isLightTheme ? 'border-slate-200 bg-slate-100 text-slate-700' : 'border-white/10 bg-black/25 text-zinc-300'}`}>{formatEntryDetails(entry.details)}</pre>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              </article>
-            {/each}
           {/if}
         </div>
+
+        {#if selectedEntry}
+          <div class={`border-t px-3 py-2 font-mono ${isLightTheme ? 'border-slate-200 bg-slate-50/90' : 'border-white/10 bg-[#0f1319]'}`}>
+            <div class="flex items-center justify-between gap-3">
+              <div class={isLightTheme ? 'text-[10px] uppercase tracking-[0.12em] text-slate-400' : 'text-[10px] uppercase tracking-[0.12em] text-zinc-500'}>
+                inspector
+              </div>
+              <button
+                type="button"
+                class={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition ${isLightTheme ? 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-100'}`}
+                onclick={closeInspector}
+                title="Fechar inspector"
+                aria-label="Fechar inspector"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div class={`mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] uppercase ${isLightTheme ? 'text-slate-500' : 'text-zinc-500'}`}>
+              <span>{formatTerminalTimestamp(selectedEntry.timestamp)}</span>
+              <span class={levelClass(selectedEntry.level)}>{selectedEntry.level}</span>
+              <span class={originClass(selectedEntry.sourceKind)}>{terminalOriginLabel(selectedEntry.sourceKind)}</span>
+              {#if formatInlineMeta(selectedEntry)}
+                <span>{formatInlineMeta(selectedEntry)}</span>
+              {/if}
+            </div>
+            <div class={`mt-1 text-[12px] leading-[1.4] ${messageClass(selectedEntry)}`}>
+              {selectedEntry.message}
+            </div>
+            {#if selectedEntry.details}
+              <pre class={`mt-2 max-h-36 overflow-auto rounded-lg border px-2 py-2 text-[10px] leading-4 ${isLightTheme ? 'border-slate-200 bg-white text-slate-700' : 'border-white/10 bg-black/25 text-zinc-300'}`}>{formatEntryDetails(selectedEntry.details)}</pre>
+            {/if}
+          </div>
+        {/if}
       </section>
 
       <aside

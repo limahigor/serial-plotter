@@ -12,8 +12,8 @@ use self::environment::{
     prepare_runtime_scaffold, write_bootstrap_files, write_runner_script,
 };
 use self::process::{
-    emit_status_event, send_command, spawn_driver_process, spawn_stderr_task, spawn_stdout_task,
-    wait_for_handshake,
+    emit_status_event, send_command, spawn_console_task, spawn_driver_process, spawn_stderr_task,
+    spawn_stdout_task, wait_for_handshake,
 };
 use self::validation::{
     ensure_driver_supports_write, validate_driver_write_support, validate_runtime_controller,
@@ -392,6 +392,7 @@ struct RuntimeHandle {
     child: Child,
     stdout_task: Option<thread::JoinHandle<()>>,
     stderr_task: Option<thread::JoinHandle<()>>,
+    console_task: Option<thread::JoinHandle<()>>,
     metrics: SharedMetrics,
 }
 
@@ -516,10 +517,16 @@ impl PlantRuntimeManager {
                 ..RuntimeMetrics::default()
             }));
             let handshake = Arc::new((Mutex::new(HandshakeState::default()), Condvar::new()));
+            let (console_sender, dropped_console_logs, console_task) = spawn_console_task(
+                app.clone(),
+                console.clone(),
+                plant.id.clone(),
+                plant.name.clone(),
+                runtime_id.clone(),
+            );
 
             let stdout_task = spawn_stdout_task(
                 app.clone(),
-                console.clone(),
                 plant.id.clone(),
                 plant.name.clone(),
                 runtime_id.clone(),
@@ -527,15 +534,19 @@ impl PlantRuntimeManager {
                 stdout,
                 handshake.clone(),
                 metrics.clone(),
+                console_sender.clone(),
+                dropped_console_logs.clone(),
             );
             let stderr_task = spawn_stderr_task(
                 app.clone(),
-                console,
                 plant.id.clone(),
                 plant.name.clone(),
                 runtime_id.clone(),
                 stderr,
+                console_sender.clone(),
+                dropped_console_logs,
             );
+            drop(console_sender);
 
             let startup = (|| -> AppResult<()> {
                 send_command(
@@ -555,6 +566,7 @@ impl PlantRuntimeManager {
                 let _ = child.wait();
                 let _ = stdout_task.join();
                 let _ = stderr_task.join();
+                let _ = console_task.join();
                 return Err(error);
             }
 
@@ -568,6 +580,7 @@ impl PlantRuntimeManager {
                 child,
                 stdout_task: Some(stdout_task),
                 stderr_task: Some(stderr_task),
+                console_task: Some(console_task),
                 metrics,
             })
         })();
@@ -616,6 +629,9 @@ impl PlantRuntimeManager {
             let _ = task.join();
         }
         if let Some(task) = handle.stderr_task.take() {
+            let _ = task.join();
+        }
+        if let Some(task) = handle.console_task.take() {
             let _ = task.join();
         }
 
@@ -1284,6 +1300,7 @@ mod tests {
                 child,
                 stdout_task: None,
                 stderr_task: None,
+                console_task: None,
                 metrics: Arc::new(Mutex::new(RuntimeMetrics::default())),
             },
         );
@@ -1326,6 +1343,7 @@ mod tests {
                 child,
                 stdout_task: None,
                 stderr_task: None,
+                console_task: None,
                 metrics: Arc::new(Mutex::new(RuntimeMetrics::default())),
             },
         );

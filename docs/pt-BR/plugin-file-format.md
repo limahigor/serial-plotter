@@ -130,6 +130,61 @@ O contexto público do driver expõe apenas:
 
 - `context.config`
 - `context.plant`
+- `context.logger`
+
+### Como pensar no `context` do driver
+
+- `context.config` contém os valores atuais da configuração do driver
+- essas chaves vêm do `schema` do plugin
+- exemplo: `self.context.config.get("port")`
+- `context.plant` contém a estrutura pública da planta já normalizada pela runtime
+- `context.logger` envia logs estruturados para o módulo `Console`
+
+### Estrutura de `context.plant`
+
+Dentro de driver e controlador, `context.plant` expõe:
+
+- `context.plant.id`
+- `context.plant.name`
+- `context.plant.variables`
+- `context.plant.variables_by_id`
+- `context.plant.sensors`
+- `context.plant.actuators`
+- `context.plant.setpoints`
+
+Leituras úteis:
+
+- ids de sensores: `self.context.plant.sensors.ids`
+- ids de atuadores: `self.context.plant.actuators.ids`
+- setpoint atual de um sensor: `self.context.plant.setpoints.get(sensor_id, 0.0)`
+- metadado de variável: `self.context.plant.variables_by_id[sensor_id].unit`
+
+Cada variável em `context.plant.variables` ou `context.plant.variables_by_id[...]` expõe:
+
+- `.id`
+- `.name`
+- `.type`
+- `.unit`
+- `.setpoint`
+- `.pv_min`
+- `.pv_max`
+- `.linked_sensor_ids`
+
+Cada grupo `context.plant.sensors` e `context.plant.actuators` expõe:
+
+- `.ids`
+- `.count`
+- `.variables`
+- `.variables_by_id`
+
+### Como usar `context.logger`
+
+Você pode emitir logs estruturados assim:
+
+- `self.context.logger.debug("mensagem", {"chave": valor})`
+- `self.context.logger.info("mensagem", {"chave": valor})`
+- `self.context.logger.warning("mensagem", {"chave": valor})`
+- `self.context.logger.error("mensagem", {"chave": valor})`
 
 ### Regras do payload de `read()`
 
@@ -195,6 +250,20 @@ O contexto público do controlador expõe apenas:
 
 - `context.controller`
 - `context.plant`
+- `context.logger`
+
+### Regra mental: `context` vs `snapshot`
+
+Use esta regra simples:
+
+- `context` = dados públicos estáveis do plugin naquele momento
+- `snapshot` = fotografia serializada do ciclo atual
+
+Na prática:
+
+- leia parâmetros normalmente por `self.context.controller.params["kp"].value`
+- leia sinais dinâmicos por `snapshot["sensors"]`, `snapshot["setpoints"]` e `snapshot["actuators"]`
+- use `snapshot["controller"]` quando você precisar da versão serializada do controlador dentro do ciclo
 
 Diferença importante:
 
@@ -220,9 +289,16 @@ Dentro do controlador, `self.context.controller` expõe:
 
 Cada entrada em `params` expõe:
 
+- `.key`
 - `.type`
 - `.value`
 - `.label`
+
+Exemplos diretos:
+
+- ganho proporcional: `self.context.controller.params["kp"].value`
+- nome legível do parâmetro: `self.context.controller.params["kp"].label`
+- tipo do parâmetro: `self.context.controller.params["kp"].type`
 
 ## Básico de `compute(snapshot)`
 
@@ -238,11 +314,78 @@ O snapshot do controlador inclui:
 - `variables_by_id`
 - `controller`
 
+### O `snapshot` carrega os parâmetros do controlador?
+
+Sim.
+
+O snapshot inclui uma cópia serializada do controlador atual em:
+
+- `snapshot["controller"]`
+
+E isso inclui também:
+
+- `snapshot["controller"]["params"]`
+
+Exemplo:
+
+- `snapshot["controller"]["params"]["kp"]["value"]`
+- `snapshot["controller"]["params"]["kp"]["label"]`
+- `snapshot["controller"]["params"]["kp"]["type"]`
+
+Diferença prática:
+
+- `self.context.controller.params["kp"].value` usa objeto com atributos
+- `snapshot["controller"]["params"]["kp"]["value"]` usa dicionário serializado
+
+Normalmente, para escrever o controlador, prefira:
+
+- parâmetros e bindings: `self.context.controller`
+- sinais do ciclo: `snapshot`
+
+### Estrutura útil de `snapshot`
+
+Campos mais usados:
+
+- `snapshot["cycle_id"]`
+- `snapshot["timestamp"]`
+- `snapshot["dt_s"]`
+- `snapshot["plant"]["id"]`
+- `snapshot["plant"]["name"]`
+- `snapshot["setpoints"]`
+- `snapshot["sensors"]`
+- `snapshot["actuators"]`
+- `snapshot["variables_by_id"]`
+- `snapshot["controller"]`
+
 Leituras típicas:
 
 - PV atual: `snapshot["sensors"].get(sensor_id, 0.0)`
 - SP atual: `snapshot["setpoints"].get(sensor_id, 0.0)`
 - readback de atuador: `snapshot["actuators"].get(actuator_id, 0.0)`
+- unidade da variável: `snapshot["variables_by_id"][sensor_id]["unit"]`
+- setpoint público cadastrado da variável: `snapshot["variables_by_id"][sensor_id]["setpoint"]`
+
+Exemplo completo:
+
+```python
+def compute(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
+    sensor_id = self.context.controller.input_variable_ids[0]
+    actuator_id = self.context.controller.output_variable_ids[0]
+
+    kp = self.context.controller.params["kp"].value
+    pv = snapshot["sensors"].get(sensor_id, 0.0)
+    sp = snapshot["setpoints"].get(sensor_id, 0.0)
+    dt_s = snapshot["dt_s"]
+    unit = snapshot["variables_by_id"][sensor_id]["unit"]
+
+    self.context.logger.debug(
+        "Calculando controlador",
+        {"sensor_id": sensor_id, "pv": pv, "sp": sp, "dt_s": dt_s, "unit": unit},
+    )
+
+    erro = sp - pv
+    return {actuator_id: kp * erro}
+```
 
 ## Payload de retorno do Controlador
 

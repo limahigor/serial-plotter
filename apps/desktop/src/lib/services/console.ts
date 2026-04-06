@@ -59,6 +59,8 @@ type ConsoleBadgeEventDto = {
   badge_count: number;
 };
 
+type ConsoleEntriesEventDto = ConsoleLogEntryDto[];
+
 function mapAlertTargetDto(target: ConsoleAlertTargetDto): ConsoleAlertTarget {
   if (target.type === 'selected_plants') {
     return {
@@ -219,10 +221,19 @@ export async function clearConsoleLogs(): Promise<ConsoleOverview> {
 }
 
 export async function subscribeConsoleEvents(handlers: {
+  onEntries?: (entries: ConsoleLogEntry[]) => void;
   onEntry?: (entry: ConsoleLogEntry) => void;
   onBadge?: (badgeCount: number) => void;
 }): Promise<() => void> {
   const unlisteners: UnlistenFn[] = [];
+
+  if (handlers.onEntries) {
+    unlisteners.push(
+      await listen<ConsoleEntriesEventDto>('console://entries', (event) => {
+        handlers.onEntries?.((event.payload ?? []).map(mapLogEntry));
+      }),
+    );
+  }
 
   if (handlers.onEntry) {
     unlisteners.push(

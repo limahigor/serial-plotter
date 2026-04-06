@@ -11,11 +11,13 @@ use crate::state::{
     console_store::{ConsoleStoreState, MAX_RECENT_ENTRIES},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Runtime};
 use uuid::Uuid;
 
@@ -23,6 +25,7 @@ const LOG_RETENTION_DAYS: i64 = 30;
 const DEFAULT_LOG_QUERY_LIMIT: usize = 200;
 const MAX_LOG_QUERY_LIMIT: usize = 1000;
 const CONSOLE_ENTRY_EVENT: &str = "console://entry";
+const CONSOLE_ENTRIES_EVENT: &str = "console://entries";
 const CONSOLE_BADGE_EVENT: &str = "console://badge";
 
 pub struct ConsoleService;
@@ -118,72 +121,91 @@ impl ConsoleService {
         console: &ConsoleStore,
         input: ConsoleLogInput,
     ) -> AppResult<ConsoleLogEntry> {
-        let message = input.message.trim();
-        if message.is_empty() {
-            return Err(AppError::InvalidArgument(
-                "Mensagem de log não pode ser vazia".into(),
-            ));
+        let mut entries = Self::append_logs(app, console, vec![input])?;
+        entries
+            .pop()
+            .ok_or(AppError::InternalError)
+    }
+
+    pub fn append_logs<R: Runtime>(
+        app: Option<&AppHandle<R>>,
+        console: &ConsoleStore,
+        inputs: Vec<ConsoleLogInput>,
+    ) -> AppResult<Vec<ConsoleLogEntry>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
         }
 
         ensure_console_layout()?;
 
-        let entry = ConsoleLogEntry {
-            id: format!("log_{}", Uuid::new_v4().simple()),
-            timestamp: Utc::now(),
-            level: input.level,
-            message: message.to_string(),
-            source_scope: input.source_scope,
-            source_kind: input.source_kind,
-            plant_id: input.plant_id,
-            plant_name: input.plant_name,
-            runtime_id: input.runtime_id,
-            plugin_id: input.plugin_id,
-            plugin_name: input.plugin_name,
-            controller_id: input.controller_id,
-            controller_name: input.controller_name,
-            details: input.details,
-        };
+        let mut entries = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let message = input.message.trim();
+            if message.is_empty() {
+                return Err(AppError::InvalidArgument(
+                    "Mensagem de log não pode ser vazia".into(),
+                ));
+            }
 
-        append_entry_to_disk(&entry)?;
-        console.push_recent_entry(entry.clone());
-        if let (Some(plant_id), Some(plant_name)) = (&entry.plant_id, &entry.plant_name) {
-            console.register_known_plant(ConsolePlantOption {
-                plant_id: plant_id.clone(),
-                plant_name: plant_name.clone(),
+            entries.push(ConsoleLogEntry {
+                id: format!("log_{}", Uuid::new_v4().simple()),
+                timestamp: Utc::now(),
+                level: input.level,
+                message: message.to_string(),
+                source_scope: input.source_scope,
+                source_kind: input.source_kind,
+                plant_id: input.plant_id,
+                plant_name: input.plant_name,
+                runtime_id: input.runtime_id,
+                plugin_id: input.plugin_id,
+                plugin_name: input.plugin_name,
+                controller_id: input.controller_id,
+                controller_name: input.controller_name,
+                details: input.details,
             });
         }
 
-        let snapshot = console.snapshot();
-        let should_increment_badge =
-            entry_matches_any_rule(&entry, &snapshot.rules)
-                && snapshot
-                    .console_state
-                    .last_alert_read_at
-                    .is_none_or(|timestamp| entry.timestamp > timestamp);
+        append_entries_to_disk(&entries)?;
+        console.append_recent_entries(&entries);
 
-        let next_badge_count = if should_increment_badge {
-            let next = snapshot.badge_count.saturating_add(1);
-            console.set_badge_count(next);
-            next
+        let snapshot = console.badge_state_snapshot();
+        let badge_increment = entries
+            .iter()
+            .filter(|entry| {
+                entry_matches_any_rule(entry, &snapshot.rules)
+                    && snapshot
+                        .last_alert_read_at
+                        .is_none_or(|timestamp| entry.timestamp > timestamp)
+            })
+            .count();
+
+        let next_badge_count = if badge_increment > 0 {
+            console.increment_badge_count_by(badge_increment)
         } else {
             snapshot.badge_count
         };
 
         if let Some(app) = app {
-            emit_entry_event(app, &entry);
-            if should_increment_badge {
+            if entries.len() == 1 {
+                emit_entry_event(app, &entries[0]);
+            } else {
+                emit_entries_event(app, &entries);
+            }
+            if badge_increment > 0 {
                 emit_badge_event(app, next_badge_count);
             }
         }
 
-        Ok(entry)
+        Ok(entries)
     }
 
-    pub fn save_alert_rule<R: Runtime>(
-        app: &AppHandle<R>,
+    pub fn save_alert_rule(
         console: &ConsoleStore,
         request: SaveConsoleAlertRuleRequest,
     ) -> AppResult<ConsoleOverviewResponse> {
+        ensure_console_layout()?;
+        prune_old_log_files()?;
+
         let name = request.name.trim();
         if name.is_empty() {
             return Err(AppError::InvalidArgument(
@@ -220,17 +242,24 @@ impl ConsoleService {
         }
 
         save_alert_rules(&rules)?;
-        Self::load(console)?;
-        let overview = Self::get_overview(console);
-        emit_badge_event(app, overview.badge_count);
+        let snapshot = console.snapshot();
+        let console_state = snapshot.console_state;
+        let badge_count = compute_badge_count_from_recent_entries(
+            &snapshot.recent_entries,
+            &rules,
+            console_state.last_alert_read_at.as_ref(),
+        );
+        let overview = replace_console_overview(console, rules, console_state, badge_count);
         Ok(overview)
     }
 
-    pub fn delete_alert_rule<R: Runtime>(
-        app: &AppHandle<R>,
+    pub fn delete_alert_rule(
         console: &ConsoleStore,
         request: DeleteConsoleAlertRuleRequest,
     ) -> AppResult<ConsoleOverviewResponse> {
+        ensure_console_layout()?;
+        prune_old_log_files()?;
+
         let mut rules = load_alert_rules()?;
         let initial_len = rules.len();
         rules.retain(|rule| rule.id != request.id);
@@ -242,21 +271,59 @@ impl ConsoleService {
         }
 
         save_alert_rules(&rules)?;
-        Self::load(console)?;
-        let overview = Self::get_overview(console);
-        emit_badge_event(app, overview.badge_count);
+        let snapshot = console.snapshot();
+        let console_state = snapshot.console_state;
+        let badge_count = compute_badge_count_from_recent_entries(
+            &snapshot.recent_entries,
+            &rules,
+            console_state.last_alert_read_at.as_ref(),
+        );
+        let overview = replace_console_overview(console, rules, console_state, badge_count);
         Ok(overview)
+    }
+
+    pub fn recompute_badge_count_async<R: Runtime>(app: AppHandle<R>, console: Arc<ConsoleStore>) {
+        let generation = console.next_badge_recompute_generation();
+        let snapshot = console.snapshot();
+
+        if !has_enabled_alert_rules(&snapshot.rules) {
+            console.set_badge_count(0);
+            emit_badge_event(&app, 0);
+            return;
+        }
+
+        std::thread::spawn(move || {
+            let badge_count = match count_matching_retained_logs(
+                &snapshot.rules,
+                snapshot.console_state.last_alert_read_at.as_ref(),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("Falha ao recalcular badge do console em background: {error}");
+                    return;
+                }
+            };
+
+            if generation != console.current_badge_recompute_generation() {
+                return;
+            }
+
+            console.set_badge_count(badge_count);
+            emit_badge_event(&app, badge_count);
+        });
     }
 
     pub fn mark_alerts_read<R: Runtime>(
         app: &AppHandle<R>,
         console: &ConsoleStore,
     ) -> AppResult<ConsoleOverviewResponse> {
-        save_console_state(&ConsoleState {
+        console.next_badge_recompute_generation();
+        let console_state = ConsoleState {
             last_alert_read_at: Some(Utc::now()),
-        })?;
-        Self::load(console)?;
-        let overview = Self::get_overview(console);
+        };
+        save_console_state(&console_state)?;
+        let rules = console.snapshot().rules;
+        let overview = replace_console_overview(console, rules, console_state, 0);
         emit_badge_event(app, overview.badge_count);
         Ok(overview)
     }
@@ -265,6 +332,7 @@ impl ConsoleService {
         app: &AppHandle<R>,
         console: &ConsoleStore,
     ) -> AppResult<ConsoleOverviewResponse> {
+        console.next_badge_recompute_generation();
         let logs_dir = WorkspaceService::console_logs_directory()?;
         if logs_dir.exists() {
             fs::remove_dir_all(&logs_dir).map_err(|error| {
@@ -286,11 +354,25 @@ impl ConsoleService {
                 &error,
             )
         })?;
-        save_console_state(&ConsoleState {
+        let console_state = ConsoleState {
             last_alert_read_at: Some(Utc::now()),
-        })?;
-        Self::load(console)?;
-        let overview = Self::get_overview(console);
+        };
+        save_console_state(&console_state)?;
+        let snapshot = console.snapshot();
+        let next_state = ConsoleStoreState {
+            recent_entries: VecDeque::new(),
+            rules: snapshot.rules,
+            known_plants: Vec::new(),
+            console_state: console_state.clone(),
+            badge_count: 0,
+        };
+        console.replace_all(next_state.clone());
+        let overview = ConsoleOverviewResponse {
+            badge_count: next_state.badge_count,
+            rules: next_state.rules,
+            known_plants: next_state.known_plants,
+            last_alert_read_at: next_state.console_state.last_alert_read_at,
+        };
         emit_badge_event(app, overview.badge_count);
         Ok(overview)
     }
@@ -298,6 +380,10 @@ impl ConsoleService {
 
 fn emit_entry_event<R: Runtime>(app: &AppHandle<R>, entry: &ConsoleLogEntry) {
     let _ = app.emit(CONSOLE_ENTRY_EVENT, entry);
+}
+
+fn emit_entries_event<R: Runtime>(app: &AppHandle<R>, entries: &[ConsoleLogEntry]) {
+    let _ = app.emit(CONSOLE_ENTRIES_EVENT, entries);
 }
 
 fn emit_badge_event<R: Runtime>(app: &AppHandle<R>, badge_count: usize) {
@@ -393,33 +479,88 @@ fn save_console_state(state: &ConsoleState) -> AppResult<()> {
     })
 }
 
-fn append_entry_to_disk(entry: &ConsoleLogEntry) -> AppResult<()> {
-    let date = entry.timestamp.date_naive();
-    let log_file = log_file_path(date)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-        .map_err(|error| {
+fn replace_console_overview(
+    console: &ConsoleStore,
+    rules: Vec<ConsoleAlertRule>,
+    console_state: ConsoleState,
+    badge_count: usize,
+) -> ConsoleOverviewResponse {
+    let mut snapshot = console.snapshot();
+    snapshot.rules = rules;
+    snapshot.console_state = console_state;
+    snapshot.badge_count = badge_count;
+
+    let overview = ConsoleOverviewResponse {
+        badge_count: snapshot.badge_count,
+        rules: snapshot.rules.clone(),
+        known_plants: snapshot.known_plants.clone(),
+        last_alert_read_at: snapshot.console_state.last_alert_read_at,
+    };
+
+    console.replace_all(snapshot);
+    overview
+}
+
+fn append_entries_to_disk(entries: &[ConsoleLogEntry]) -> AppResult<()> {
+    let mut payload_by_date = BTreeMap::<NaiveDate, String>::new();
+    for entry in entries {
+        let payload = serde_json::to_string(entry)
+            .map_err(|error| map_serde_error("Falha ao serializar linha do console", &error))?;
+        let buffer = payload_by_date
+            .entry(entry.timestamp.date_naive())
+            .or_default();
+        buffer.push_str(&payload);
+        buffer.push('\n');
+    }
+
+    for (date, payload) in payload_by_date {
+        let log_file = log_file_path(date)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&log_file)
+            .map_err(|error| {
+                map_io_error(
+                    &format!("Falha ao abrir arquivo de log '{}'", log_file.display()),
+                    &error,
+                )
+            })?;
+
+        if file.metadata().map(|metadata| metadata.len()).unwrap_or(0) > 0 {
+            file.seek(SeekFrom::End(-1)).map_err(|error| {
+                map_io_error(
+                    &format!("Falha ao posicionar leitura em '{}'", log_file.display()),
+                    &error,
+                )
+            })?;
+
+            let mut last_byte = [0u8; 1];
+            file.read_exact(&mut last_byte).map_err(|error| {
+                map_io_error(
+                    &format!("Falha ao ler final do arquivo '{}'", log_file.display()),
+                    &error,
+                )
+            })?;
+
+            if last_byte[0] != b'\n' {
+                file.write_all(b"\n").map_err(|error| {
+                    map_io_error(
+                        &format!("Falha ao normalizar separador em '{}'", log_file.display()),
+                        &error,
+                    )
+                })?;
+            }
+        }
+
+        file.write_all(payload.as_bytes()).map_err(|error| {
             map_io_error(
-                &format!("Falha ao abrir arquivo de log '{}'", log_file.display()),
+                &format!("Falha ao escrever log em '{}'", log_file.display()),
                 &error,
             )
         })?;
-    let payload = serde_json::to_string(entry)
-        .map_err(|error| map_serde_error("Falha ao serializar linha do console", &error))?;
-    file.write_all(payload.as_bytes()).map_err(|error| {
-        map_io_error(
-            &format!("Falha ao escrever log em '{}'", log_file.display()),
-            &error,
-        )
-    })?;
-    file.write_all(b"\n").map_err(|error| {
-        map_io_error(
-            &format!("Falha ao finalizar log em '{}'", log_file.display()),
-            &error,
-        )
-    })?;
+    }
+
     Ok(())
 }
 
@@ -447,7 +588,57 @@ fn read_retained_log_entries() -> AppResult<Vec<ConsoleLogEntry>> {
             if trimmed.is_empty() {
                 continue;
             }
-            let entry = serde_json::from_str::<ConsoleLogEntry>(trimmed).map_err(|error| {
+
+            parse_json_stream_fragment::<ConsoleLogEntry>(trimmed)
+                .map_err(|error| {
+                    map_serde_error(
+                        &format!(
+                            "Falha ao desserializar entrada do console em '{}'",
+                            path.display()
+                        ),
+                        &error,
+                    )
+                })?
+                .into_iter()
+                .for_each(|entry| entries.push(entry));
+        }
+    }
+    Ok(entries)
+}
+
+fn count_matching_retained_logs(
+    rules: &[ConsoleAlertRule],
+    last_alert_read_at: Option<&DateTime<Utc>>,
+) -> AppResult<usize> {
+    if rules.is_empty() {
+        return Ok(0);
+    }
+
+    let mut count = 0usize;
+    for path in retained_log_paths()? {
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                return Err(map_io_error(
+                    &format!("Falha ao abrir logs do console em '{}'", path.display()),
+                    &error,
+                ));
+            }
+        };
+
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|error| {
+                map_io_error(
+                    &format!("Falha ao ler linha de log em '{}'", path.display()),
+                    &error,
+                )
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            for entry in parse_json_stream_fragment::<ConsoleLogEntry>(trimmed).map_err(|error| {
                 map_serde_error(
                     &format!(
                         "Falha ao desserializar entrada do console em '{}'",
@@ -455,11 +646,31 @@ fn read_retained_log_entries() -> AppResult<Vec<ConsoleLogEntry>> {
                     ),
                     &error,
                 )
-            })?;
-            entries.push(entry);
+            })? {
+                if last_alert_read_at.is_none_or(|timestamp| entry.timestamp > *timestamp)
+                    && entry_matches_any_rule(&entry, rules)
+                {
+                    count = count.saturating_add(1);
+                }
+            }
         }
     }
-    Ok(entries)
+
+    Ok(count)
+}
+
+fn parse_json_stream_fragment<T>(fragment: &str) -> Result<Vec<T>, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    let mut values = Vec::new();
+    let stream = serde_json::Deserializer::from_str(fragment).into_iter::<T>();
+
+    for value in stream {
+        values.push(value?);
+    }
+
+    Ok(values)
 }
 
 fn retained_log_paths() -> AppResult<Vec<PathBuf>> {
@@ -565,6 +776,24 @@ fn compute_badge_count(
                 && entry_matches_any_rule(entry, rules)
         })
         .count()
+}
+
+fn compute_badge_count_from_recent_entries(
+    entries: &VecDeque<ConsoleLogEntry>,
+    rules: &[ConsoleAlertRule],
+    last_alert_read_at: Option<&DateTime<Utc>>,
+) -> usize {
+    entries
+        .iter()
+        .filter(|entry| {
+            last_alert_read_at.is_none_or(|timestamp| entry.timestamp > *timestamp)
+                && entry_matches_any_rule(entry, rules)
+        })
+        .count()
+}
+
+fn has_enabled_alert_rules(rules: &[ConsoleAlertRule]) -> bool {
+    rules.iter().any(|rule| rule.enabled)
 }
 
 fn resolve_log_query_limit(limit: Option<usize>) -> usize {
@@ -737,9 +966,7 @@ mod tests {
             Some("Planta 1"),
         );
 
-        let app = tauri::test::mock_app();
         ConsoleService::save_alert_rule(
-            app.handle(),
             &console,
             SaveConsoleAlertRuleRequest {
                 id: None,
@@ -765,7 +992,6 @@ mod tests {
         let app = tauri::test::mock_app();
 
         ConsoleService::save_alert_rule(
-            app.handle(),
             &console,
             SaveConsoleAlertRuleRequest {
                 id: None,
@@ -782,5 +1008,32 @@ mod tests {
 
         ConsoleService::mark_alerts_read(app.handle(), &console).unwrap();
         assert_eq!(ConsoleService::get_overview(&console).badge_count, 0);
+    }
+
+    #[test]
+    fn list_logs_accepts_multiple_json_objects_in_the_same_line() {
+        reset_console_workspace();
+        let console = ConsoleStore::new();
+        ConsoleService::load(&console).unwrap();
+
+        let first = build_entry(&console, "linha 1", ConsoleLogLevel::Info, None, None);
+        let second = build_entry(&console, "linha 2", ConsoleLogLevel::Error, None, None);
+
+        let log_path = log_file_path(Utc::now().date_naive()).unwrap();
+        let merged = format!(
+            "{}{}",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        fs::write(&log_path, format!("{merged}\n")).unwrap();
+
+        let reloaded_console = ConsoleStore::new();
+        ConsoleService::load(&reloaded_console).unwrap();
+
+        let logs =
+            ConsoleService::list_logs(&reloaded_console, ListConsoleLogsRequest::default()).unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].message, "linha 2");
+        assert_eq!(logs[1].message, "linha 1");
     }
 }

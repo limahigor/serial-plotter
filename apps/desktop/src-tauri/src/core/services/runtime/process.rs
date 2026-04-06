@@ -14,10 +14,33 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+    mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Runtime};
+
+const RUNTIME_CONSOLE_QUEUE_CAPACITY: usize = 2_048;
+const RUNTIME_CONSOLE_BATCH_SIZE: usize = 64;
+const RUNTIME_CONSOLE_FLUSH_INTERVAL: Duration = Duration::from_millis(40);
+
+#[derive(Debug, Clone)]
+pub(super) struct RuntimeConsoleRecord {
+    level: ConsoleLogLevel,
+    source_kind: ConsoleSourceKind,
+    message: String,
+    plugin_id: Option<String>,
+    plugin_name: Option<String>,
+    controller_id: Option<String>,
+    controller_name: Option<String>,
+    details: Option<Value>,
+}
+
+pub(super) type RuntimeConsoleSender = SyncSender<RuntimeConsoleRecord>;
+pub(super) type SharedDroppedConsoleLogs = Arc<AtomicUsize>;
 
 #[allow(clippy::cast_precision_loss)]
 fn sample_time_ms_as_f64(sample_time_ms: u64) -> f64 {
@@ -52,9 +75,38 @@ pub(super) fn spawn_driver_process(
     })
 }
 
-pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
+pub(super) fn spawn_console_task<R: Runtime + 'static>(
     app: AppHandle<R>,
     console: Arc<ConsoleStore>,
+    plant_id: String,
+    plant_name: String,
+    runtime_id: String,
+) -> (
+    RuntimeConsoleSender,
+    SharedDroppedConsoleLogs,
+    thread::JoinHandle<()>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(RUNTIME_CONSOLE_QUEUE_CAPACITY);
+    let dropped_logs = Arc::new(AtomicUsize::new(0));
+    let dropped_logs_for_task = dropped_logs.clone();
+
+    let task = thread::spawn(move || {
+        drain_runtime_console_queue(
+            &app,
+            console.as_ref(),
+            &plant_id,
+            &plant_name,
+            &runtime_id,
+            receiver,
+            dropped_logs_for_task.as_ref(),
+        );
+    });
+
+    (sender, dropped_logs, task)
+}
+
+pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
+    app: AppHandle<R>,
     plant_id: String,
     plant_name: String,
     runtime_id: String,
@@ -62,6 +114,8 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
     stdout: ChildStdout,
     handshake: SharedHandshake,
     metrics: SharedMetrics,
+    console_sender: RuntimeConsoleSender,
+    dropped_console_logs: SharedDroppedConsoleLogs,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
@@ -75,20 +129,22 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
                         &runtime_id,
                         &format!("Falha ao ler stdout do driver: {error}"),
                     );
-                    append_plant_console_log(
-                        &app,
-                        console.as_ref(),
+                    enqueue_plant_console_log(
+                        &console_sender,
+                        dropped_console_logs.as_ref(),
                         &plant_id,
                         &plant_name,
                         &runtime_id,
-                        ConsoleLogLevel::Error,
-                        ConsoleSourceKind::Runtime,
-                        &format!("Falha ao ler stdout do driver: {error}"),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        RuntimeConsoleRecord {
+                            level: ConsoleLogLevel::Error,
+                            source_kind: ConsoleSourceKind::Runtime,
+                            message: format!("Falha ao ler stdout do driver: {error}"),
+                            plugin_id: None,
+                            plugin_name: None,
+                            controller_id: None,
+                            controller_name: None,
+                            details: None,
+                        },
                     );
                     break;
                 }
@@ -103,20 +159,22 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
                         &runtime_id,
                         &format!("Mensagem inválida recebida do driver: {error}"),
                     );
-                    append_plant_console_log(
-                        &app,
-                        console.as_ref(),
+                    enqueue_plant_console_log(
+                        &console_sender,
+                        dropped_console_logs.as_ref(),
                         &plant_id,
                         &plant_name,
                         &runtime_id,
-                        ConsoleLogLevel::Error,
-                        ConsoleSourceKind::Runtime,
-                        &format!("Mensagem inválida recebida do driver: {error}"),
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(json!({ "raw_line": line })),
+                        RuntimeConsoleRecord {
+                            level: ConsoleLogLevel::Error,
+                            source_kind: ConsoleSourceKind::Runtime,
+                            message: format!("Mensagem inválida recebida do driver: {error}"),
+                            plugin_id: None,
+                            plugin_name: None,
+                            controller_id: None,
+                            controller_name: None,
+                            details: Some(json!({ "raw_line": line })),
+                        },
                     );
                     continue;
                 }
@@ -148,23 +206,26 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
                     &envelope.payload,
                     &handshake,
                     &metrics,
-                    console.as_ref(),
+                    &console_sender,
+                    dropped_console_logs.as_ref(),
                 ),
                 "warning" => handle_runtime_warning_event(
                     &app,
-                    console.as_ref(),
                     &plant_id,
                     &plant_name,
                     &runtime_id,
                     &envelope.payload,
+                    &console_sender,
+                    dropped_console_logs.as_ref(),
                 ),
                 "log" => handle_runtime_log_event(
                     &app,
-                    console.as_ref(),
                     &plant_id,
                     &plant_name,
                     &runtime_id,
                     &envelope.payload,
+                    &console_sender,
+                    dropped_console_logs.as_ref(),
                 ),
                 "telemetry" => process_telemetry(
                     &app,
@@ -196,40 +257,164 @@ pub(super) fn spawn_stdout_task<R: Runtime + 'static>(
 }
 
 pub(super) fn spawn_stderr_task<R: Runtime + 'static>(
-    app: AppHandle<R>,
-    console: Arc<ConsoleStore>,
+    _app: AppHandle<R>,
     plant_id: String,
     plant_name: String,
     runtime_id: String,
     stderr: ChildStderr,
+    console_sender: RuntimeConsoleSender,
+    dropped_console_logs: SharedDroppedConsoleLogs,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
             if !line.trim().is_empty() {
                 eprintln!("[driver-runtime][plant={plant_id}][runtime={runtime_id}] {line}");
-                append_plant_console_log(
-                    &app,
-                    console.as_ref(),
+                enqueue_plant_console_log(
+                    &console_sender,
+                    dropped_console_logs.as_ref(),
                     &plant_id,
                     &plant_name,
                     &runtime_id,
-                    infer_stderr_log_level(&line),
-                    ConsoleSourceKind::NativeOutput,
-                    &line,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(json!({
-                        "channel": "stderr",
-                        "classification": "external_output",
-                        "source_label": "EXTERNO"
-                    })),
+                    RuntimeConsoleRecord {
+                        level: infer_stderr_log_level(&line),
+                        source_kind: ConsoleSourceKind::NativeOutput,
+                        message: line.clone(),
+                        plugin_id: None,
+                        plugin_name: None,
+                        controller_id: None,
+                        controller_name: None,
+                        details: Some(json!({
+                            "channel": "stderr",
+                            "classification": "external_output",
+                            "source_label": "EXTERNO"
+                        })),
+                    },
                 );
             }
         }
     })
+}
+
+fn drain_runtime_console_queue<R: Runtime>(
+    app: &AppHandle<R>,
+    console: &ConsoleStore,
+    plant_id: &str,
+    plant_name: &str,
+    runtime_id: &str,
+    receiver: Receiver<RuntimeConsoleRecord>,
+    dropped_console_logs: &AtomicUsize,
+) {
+    let mut batch = Vec::<RuntimeConsoleRecord>::with_capacity(RUNTIME_CONSOLE_BATCH_SIZE);
+
+    loop {
+        match receiver.recv_timeout(RUNTIME_CONSOLE_FLUSH_INTERVAL) {
+            Ok(record) => {
+                batch.push(record);
+                while batch.len() < RUNTIME_CONSOLE_BATCH_SIZE {
+                    match receiver.try_recv() {
+                        Ok(record) => batch.push(record),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            append_dropped_console_summary(&mut batch, dropped_console_logs);
+                            flush_runtime_console_batch(
+                                app, console, plant_id, plant_name, runtime_id, &mut batch,
+                            );
+                            return;
+                        }
+                    }
+                }
+                append_dropped_console_summary(&mut batch, dropped_console_logs);
+                flush_runtime_console_batch(app, console, plant_id, plant_name, runtime_id, &mut batch);
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                append_dropped_console_summary(&mut batch, dropped_console_logs);
+                flush_runtime_console_batch(app, console, plant_id, plant_name, runtime_id, &mut batch);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                append_dropped_console_summary(&mut batch, dropped_console_logs);
+                flush_runtime_console_batch(app, console, plant_id, plant_name, runtime_id, &mut batch);
+                return;
+            }
+        }
+    }
+}
+
+fn enqueue_plant_console_log(
+    sender: &RuntimeConsoleSender,
+    dropped_console_logs: &AtomicUsize,
+    _plant_id: &str,
+    _plant_name: &str,
+    _runtime_id: &str,
+    record: RuntimeConsoleRecord,
+) {
+    match sender.try_send(record) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            dropped_console_logs.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+fn append_dropped_console_summary(
+    batch: &mut Vec<RuntimeConsoleRecord>,
+    dropped_console_logs: &AtomicUsize,
+) {
+    let dropped = dropped_console_logs.swap(0, Ordering::Relaxed);
+    if dropped == 0 {
+        return;
+    }
+
+    batch.push(RuntimeConsoleRecord {
+        level: ConsoleLogLevel::Warning,
+        source_kind: ConsoleSourceKind::Runtime,
+        message: format!(
+            "Console congestionado: {dropped} logs foram descartados para preservar a runtime"
+        ),
+        plugin_id: None,
+        plugin_name: None,
+        controller_id: None,
+        controller_name: None,
+        details: Some(json!({
+            "classification": "dropped_console_logs",
+            "dropped_count": dropped,
+            "reason": "runtime_console_backpressure",
+        })),
+    });
+}
+
+fn flush_runtime_console_batch<R: Runtime>(
+    app: &AppHandle<R>,
+    console: &ConsoleStore,
+    plant_id: &str,
+    plant_name: &str,
+    runtime_id: &str,
+    batch: &mut Vec<RuntimeConsoleRecord>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+
+    let inputs = batch
+        .drain(..)
+        .map(|record| ConsoleLogInput {
+            level: record.level,
+            message: record.message,
+            source_scope: ConsoleSourceScope::Plant,
+            source_kind: record.source_kind,
+            plant_id: Some(plant_id.to_string()),
+            plant_name: Some(plant_name.to_string()),
+            runtime_id: Some(runtime_id.to_string()),
+            plugin_id: record.plugin_id,
+            plugin_name: record.plugin_name,
+            controller_id: record.controller_id,
+            controller_name: record.controller_name,
+            details: record.details,
+        })
+        .collect::<Vec<_>>();
+
+    let _ = ConsoleService::append_logs(Some(app), console, inputs);
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -252,100 +437,71 @@ struct RuntimeConsolePayload {
     details: Option<Value>,
 }
 
-fn append_plant_console_log<R: Runtime>(
-    app: &AppHandle<R>,
-    console: &ConsoleStore,
-    plant_id: &str,
-    plant_name: &str,
-    runtime_id: &str,
-    level: ConsoleLogLevel,
-    source_kind: ConsoleSourceKind,
-    message: &str,
-    plugin_id: Option<String>,
-    plugin_name: Option<String>,
-    controller_id: Option<String>,
-    controller_name: Option<String>,
-    details: Option<Value>,
-) {
-    let _ = ConsoleService::append_log(
-        Some(app),
-        console,
-        ConsoleLogInput {
-            level,
-            message: message.to_string(),
-            source_scope: ConsoleSourceScope::Plant,
-            source_kind,
-            plant_id: Some(plant_id.to_string()),
-            plant_name: Some(plant_name.to_string()),
-            runtime_id: Some(runtime_id.to_string()),
-            plugin_id,
-            plugin_name,
-            controller_id,
-            controller_name,
-            details,
-        },
-    );
-}
-
 fn infer_stderr_log_level(_line: &str) -> ConsoleLogLevel {
     ConsoleLogLevel::Debug
 }
 
 fn handle_runtime_warning_event<R: Runtime>(
-    app: &AppHandle<R>,
-    console: &ConsoleStore,
+    _app: &AppHandle<R>,
     plant_id: &str,
     plant_name: &str,
     runtime_id: &str,
     payload: &Value,
+    console_sender: &RuntimeConsoleSender,
+    dropped_console_logs: &AtomicUsize,
 ) {
     let payload = serde_json::from_value::<RuntimeConsolePayload>(payload.clone()).unwrap_or_default();
     let message = payload
         .message
         .unwrap_or_else(|| "Aviso da runtime Python".to_string());
-    append_plant_console_log(
-        app,
-        console,
+    enqueue_plant_console_log(
+        console_sender,
+        dropped_console_logs,
         plant_id,
         plant_name,
         runtime_id,
-        payload.level.unwrap_or(ConsoleLogLevel::Warning),
-        payload.source_kind.unwrap_or(ConsoleSourceKind::Runtime),
-        &message,
-        payload.plugin_id,
-        payload.plugin_name,
-        payload.controller_id,
-        payload.controller_name,
-        payload.details,
+        RuntimeConsoleRecord {
+            level: payload.level.unwrap_or(ConsoleLogLevel::Warning),
+            source_kind: payload.source_kind.unwrap_or(ConsoleSourceKind::Runtime),
+            message,
+            plugin_id: payload.plugin_id,
+            plugin_name: payload.plugin_name,
+            controller_id: payload.controller_id,
+            controller_name: payload.controller_name,
+            details: payload.details,
+        },
     );
 }
 
 fn handle_runtime_log_event<R: Runtime>(
-    app: &AppHandle<R>,
-    console: &ConsoleStore,
+    _app: &AppHandle<R>,
     plant_id: &str,
     plant_name: &str,
     runtime_id: &str,
     payload: &Value,
+    console_sender: &RuntimeConsoleSender,
+    dropped_console_logs: &AtomicUsize,
 ) {
     let payload = serde_json::from_value::<RuntimeConsolePayload>(payload.clone()).unwrap_or_default();
     let message = payload
         .message
         .unwrap_or_else(|| "Log da runtime Python".to_string());
-    append_plant_console_log(
-        app,
-        console,
+    enqueue_plant_console_log(
+        console_sender,
+        dropped_console_logs,
         plant_id,
         plant_name,
         runtime_id,
-        payload.level.unwrap_or(ConsoleLogLevel::Info),
-        payload.source_kind.unwrap_or(ConsoleSourceKind::Runtime),
-        &message,
-        payload.plugin_id,
-        payload.plugin_name,
-        payload.controller_id,
-        payload.controller_name,
-        payload.details,
+        RuntimeConsoleRecord {
+            level: payload.level.unwrap_or(ConsoleLogLevel::Info),
+            source_kind: payload.source_kind.unwrap_or(ConsoleSourceKind::Runtime),
+            message,
+            plugin_id: payload.plugin_id,
+            plugin_name: payload.plugin_name,
+            controller_id: payload.controller_id,
+            controller_name: payload.controller_name,
+            details: payload.details,
+        },
     );
 }
 
@@ -419,7 +575,8 @@ fn handle_runtime_error_event<R: Runtime>(
     payload: &Value,
     handshake: &SharedHandshake,
     metrics: &SharedMetrics,
-    console: &ConsoleStore,
+    console_sender: &RuntimeConsoleSender,
+    dropped_console_logs: &AtomicUsize,
 ) {
     let message = payload
         .get("message")
@@ -447,20 +604,22 @@ fn handle_runtime_error_event<R: Runtime>(
             cycle_late: lock.cycle_late,
         },
     );
-    append_plant_console_log(
-        app,
-        console,
+    enqueue_plant_console_log(
+        console_sender,
+        dropped_console_logs,
         plant_id,
         plant_name,
         runtime_id,
-        ConsoleLogLevel::Error,
-        ConsoleSourceKind::Runtime,
-        &message,
-        None,
-        None,
-        None,
-        None,
-        Some(payload.clone()),
+        RuntimeConsoleRecord {
+            level: ConsoleLogLevel::Error,
+            source_kind: ConsoleSourceKind::Runtime,
+            message: message.clone(),
+            plugin_id: None,
+            plugin_name: None,
+            controller_id: None,
+            controller_name: None,
+            details: Some(payload.clone()),
+        },
     );
     let _ = emit_error_event(app, plant_id, runtime_id, &message);
 }

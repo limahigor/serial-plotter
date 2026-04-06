@@ -161,8 +161,8 @@ class ${className}:
 
     def __init__(self, context: Any) -> None:
         # Contrato atual:
-        # - context.config -> configuração do driver
-        # - context.plant -> planta, sensores, atuadores e setpoints
+        # - context.config -> dict com valores atuais da configuração do driver
+        # - context.plant -> id, nome, variáveis, variables_by_id, sensores, atuadores e setpoints
         # - context.logger -> logger estruturado (debug/info/warning/error)
         self.context = context
 
@@ -170,6 +170,7 @@ class ${className}:
         # Exemplos uteis:
         # port = self.context.config.get("port")
         # sensor_ids = self.context.plant.sensors.ids
+        # sensor_unit = self.context.plant.variables_by_id[sensor_ids[0]].unit
         # self.context.logger.info("Driver conectando", {"port": port})
         return True
 
@@ -207,7 +208,8 @@ class ${className}:
     def __init__(self, context: Any) -> None:
         # Contrato atual:
         # - context.controller -> id, nome, tipo, bindings e parametros
-        # - context.plant -> variaveis, sensores, atuadores e setpoints
+        # - context.controller.params["kp"].value -> valor atual do parametro
+        # - context.plant -> variaveis, sensors.ids, actuators.ids e setpoints
         # - context.logger -> logger estruturado (debug/info/warning/error)
         self.context = context
 
@@ -217,7 +219,9 @@ class ${className}:
         # - snapshot["setpoints"]
         # - snapshot["sensors"]
         # - snapshot["actuators"]
+        # - snapshot["variables_by_id"]
         # - snapshot["controller"]
+        # - snapshot["controller"]["params"]["kp"]["value"] -> copia serializada do parametro
         #
         # Retorne apenas saidas por variable_id de atuador.
         outputs: Dict[str, float] = {}

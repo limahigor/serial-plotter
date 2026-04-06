@@ -57,7 +57,7 @@
   });
 </script>
 
-<div class="h-dvh w-full select-none">
+<div class="h-dvh w-full select-none overflow-hidden">
   <div class="flex h-full w-full bg-slate-100 dark:bg-zinc-950 text-slate-800 dark:text-zinc-100 font-sans overflow-hidden transition-colors duration-300">
     {#if isMobileLayout && mobileSidebarOpen}
       <button
@@ -91,7 +91,7 @@
       </button>
     {/if}
 
-    <main class="flex-1 flex flex-col min-w-0 min-h-0 relative">
+    <main class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div class="flex-1 flex flex-col min-w-0 min-h-0" style:display={appStore.state.activeModule === 'plotter' ? 'flex' : 'none'}>
         <PlotterWorkspaceModule
           plants={appStore.plotterPlants}

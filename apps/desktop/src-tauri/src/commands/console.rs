@@ -37,7 +37,10 @@ pub fn save_console_alert_rule(
     state: State<'_, AppState>,
     request: SaveConsoleAlertRuleRequest,
 ) -> Result<ConsoleOverviewResponse, ErrorDto> {
-    ConsoleService::save_alert_rule(&app, state.console(), request).map_err(ErrorDto::from)
+    let console = state.console_handle();
+    let overview = ConsoleService::save_alert_rule(console.as_ref(), request).map_err(ErrorDto::from)?;
+    ConsoleService::recompute_badge_count_async(app, console);
+    Ok(overview)
 }
 
 #[tauri::command]
@@ -46,7 +49,11 @@ pub fn delete_console_alert_rule(
     state: State<'_, AppState>,
     request: DeleteConsoleAlertRuleRequest,
 ) -> Result<ConsoleOverviewResponse, ErrorDto> {
-    ConsoleService::delete_alert_rule(&app, state.console(), request).map_err(ErrorDto::from)
+    let console = state.console_handle();
+    let overview =
+        ConsoleService::delete_alert_rule(console.as_ref(), request).map_err(ErrorDto::from)?;
+    ConsoleService::recompute_badge_count_async(app, console);
+    Ok(overview)
 }
 
 #[tauri::command]
