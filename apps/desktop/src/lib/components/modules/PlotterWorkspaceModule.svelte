@@ -986,9 +986,31 @@
       xMode: 'manual',
       xMin: Math.min(viewport.xMin, viewport.xMax),
       xMax: Math.max(viewport.xMin, viewport.xMax),
-      yMode: 'manual',
-      yMin: Math.min(viewport.yMin, viewport.yMax),
-      yMax: Math.max(viewport.yMin, viewport.yMax),
+      sensorYMode: 'manual',
+      sensorYMin: Math.min(viewport.yMin, viewport.yMax),
+      sensorYMax: Math.max(viewport.yMin, viewport.yMax),
+    }));
+  }
+
+  function handleActuatorViewportChange(
+    variableIndex: number,
+    viewport: { xMin: number; xMax: number; yMin: number; yMax: number },
+  ) {
+    chartScaleStatesByPlant = updateScaleStateMap(chartScaleStatesByPlant, activePlantId, variableIndex, (state) => ({
+      ...state,
+      xMode: 'manual',
+      xMin: Math.min(viewport.xMin, viewport.xMax),
+      xMax: Math.max(viewport.xMin, viewport.xMax),
+      actuatorYMode: 'manual',
+      actuatorYMin: Math.min(viewport.yMin, viewport.yMax),
+      actuatorYMax: Math.max(viewport.yMin, viewport.yMax),
+    }));
+  }
+
+  function handleResetViewport(variableIndex: number) {
+    chartScaleStatesByPlant = updateScaleStateMap(chartScaleStatesByPlant, activePlantId, variableIndex, (state) => ({
+      ...defaultChartScaleState(),
+      windowSize: state.windowSize,
     }));
   }
 
@@ -1161,7 +1183,6 @@
         bind:this={graphContainerRef}
         class="plotter-graph-area flex-1 flex min-h-0 flex-col p-3 gap-3 overflow-hidden relative"
         oncontextmenu={handleContextMenu}
-        ondblclick={resetZoom}
         role="application"
         aria-label="Área de gráficos"
       >
@@ -1190,6 +1211,8 @@
             variableStats={variableStatsArray}
             onRangeChange={handleRangeChange}
             onViewportChange={handleViewportChange}
+            onActuatorViewportChange={handleActuatorViewportChange}
+            onResetViewport={handleResetViewport}
           />
         {/if}
       </div>

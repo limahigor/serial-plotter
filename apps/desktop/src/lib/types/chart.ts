@@ -40,11 +40,14 @@ export interface VariableVisibility {
 
 export interface ChartScaleState {
   xMode: XAxisMode;
-  yMode: YAxisMode;
   xMin: number | null;
   xMax: number | null;
-  yMin: number;
-  yMax: number;
+  sensorYMode: YAxisMode;
+  sensorYMin: number;
+  sensorYMax: number;
+  actuatorYMode: YAxisMode;
+  actuatorYMin: number;
+  actuatorYMax: number;
   windowSize: number;
 }
 
@@ -61,11 +64,14 @@ export interface ChartStateType extends ChartScaleState, ChartViewState {
 export function defaultChartState(variableCount: number = 1): ChartStateType {
   return {
     xMode: 'auto',
-    yMode: 'manual',
     xMin: null,
     xMax: null,
-    yMin: 0,
-    yMax: 100,
+    sensorYMode: 'auto',
+    sensorYMin: 0,
+    sensorYMax: 100,
+    actuatorYMode: 'manual',
+    actuatorYMin: 0,
+    actuatorYMax: 100,
     windowSize: 30,
     visible: { pv: true, sp: true, mv: true },
     viewMode: 'grid',
@@ -77,11 +83,14 @@ export function defaultChartState(variableCount: number = 1): ChartStateType {
 export function defaultChartScaleState(): ChartScaleState {
   return {
     xMode: 'auto',
-    yMode: 'auto',
     xMin: null,
     xMax: null,
-    yMin: 0,
-    yMax: 100,
+    sensorYMode: 'auto',
+    sensorYMin: 0,
+    sensorYMax: 100,
+    actuatorYMode: 'manual',
+    actuatorYMin: 0,
+    actuatorYMax: 100,
     windowSize: 30,
   };
 }

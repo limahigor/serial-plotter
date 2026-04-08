@@ -13,6 +13,8 @@
     onRangeChange?: (xMin: number, xMax: number) => void;
     onViewportChange?: (viewport: { xMin: number; xMax: number; yMin: number; yMax: number }) => void;
     interactiveYAxis?: boolean;
+    interactionProfile?: 'default' | 'pyqtgraph';
+    onResetViewport?: () => void;
   }
 
   let {
@@ -24,6 +26,8 @@
     onRangeChange,
     onViewportChange,
     interactiveYAxis = false,
+    interactionProfile = 'default',
+    onResetViewport,
   }: Props = $props();
 
   let wrapper: HTMLDivElement;
@@ -31,11 +35,13 @@
   let renderPollTimer: number | null = null;
   let prevDataSignature = '';
   let _mounted = false;
-  let _panning = false;
+  let _panning = $state(false);
   let _pointerInside = false;
+  let _pointerButtonDown = false;
   let _pendingDeferredUpdate = false;
   let _localManualRange: { min: number; max: number } | null = null;
   let _localManualYRange: { min: number; max: number } | null = null;
+  let _ignoreNextSelection = false;
   let _lastResolvedXMode: 'auto' | 'sliding' | 'manual' = 'auto';
   let _lastResolvedYMode: 'auto' | 'manual' = 'auto';
   let _panStartX = 0;
@@ -47,6 +53,7 @@
   let tooltipEl: HTMLDivElement;
   const MAX_RENDER_POINTS = 2400;
   let rangeChangeRaf: number | null = null;
+  let clearIgnoredSelectionRaf: number | null = null;
   let pendingRangeChange: { xMin: number; xMax: number } | null = null;
   let pendingViewportChange:
     | { xMin: number; xMax: number; yMin: number; yMax: number }
@@ -64,6 +71,10 @@
     yMin: 0,
     yMax: 100,
   };
+
+  function usesPyqtgraphInteraction() {
+    return interactionProfile === 'pyqtgraph';
+  }
 
   function syncScaleRef() {
     const localRange = _localManualRange;
@@ -185,8 +196,23 @@
         return;
       }
 
+      if (onViewportChange) {
+        onViewportChange(nextViewport);
+        return;
+      }
+
       onRangeChange?.(nextRange.xMin, nextRange.xMax);
-      onViewportChange?.(nextViewport);
+    });
+  }
+
+  function scheduleIgnoredSelectionReset() {
+    if (clearIgnoredSelectionRaf !== null) {
+      cancelAnimationFrame(clearIgnoredSelectionRaf);
+    }
+
+    clearIgnoredSelectionRaf = requestAnimationFrame(() => {
+      clearIgnoredSelectionRaf = null;
+      _ignoreNextSelection = false;
     });
   }
 
@@ -393,7 +419,15 @@
   }
 
   function shouldDeferRuntimeRefresh(): boolean {
-    return _pointerInside && !_panning && _scaleRef.xMode === 'manual';
+    if (_pointerButtonDown || _panning) {
+      return true;
+    }
+
+    if (usesPyqtgraphInteraction()) {
+      return false;
+    }
+
+    return _pointerInside && _scaleRef.xMode === 'manual';
   }
 
   function setLocalManualRange(xMin: number, xMax: number, syncChart = true) {
@@ -461,6 +495,31 @@
   function clearLocalManualYRange() {
     _localManualYRange = null;
     syncScaleRef();
+  }
+
+  function handleDoubleClick(event: MouseEvent) {
+    if (!onResetViewport && !usesPyqtgraphInteraction()) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    pendingRangeChange = null;
+    pendingViewportChange = null;
+    if (rangeChangeRaf !== null) {
+      cancelAnimationFrame(rangeChangeRaf);
+      rangeChangeRaf = null;
+    }
+
+    if (onResetViewport) {
+      onResetViewport();
+      return;
+    }
+
+    clearLocalManualRange();
+    clearLocalManualYRange();
+    updateChart();
   }
 
   function buildSeries(): uPlot.Series[] {
@@ -589,6 +648,16 @@
       hooks: {
         setSelect: [
           (u: uPlot) => {
+            if (_ignoreNextSelection) {
+              _ignoreNextSelection = false;
+              if (clearIgnoredSelectionRaf !== null) {
+                cancelAnimationFrame(clearIgnoredSelectionRaf);
+                clearIgnoredSelectionRaf = null;
+              }
+              u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+              return;
+            }
+
             const sel = u.select;
             if (sel.width > 2) {
               const xMin = u.posToVal(sel.left, 'x');
@@ -714,9 +783,15 @@
 
   function handlePointerDown(e: PointerEvent) {
     if (!chart || !wrapper) return;
-    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+    if (e.button === 0 || e.button === 1) {
+      _pointerButtonDown = true;
+    }
+
+    const shouldPan = e.button === 1 || (e.button === 0 && e.shiftKey);
+    if (shouldPan) {
       e.preventDefault();
       _panning = true;
+      _ignoreNextSelection = e.button === 0 && e.shiftKey;
       _panStartX = e.clientX;
       _panStartY = e.clientY;
       _panScaleMin = chart.scales.x.min ?? 0;
@@ -785,17 +860,21 @@
     }
     resetWrapperCursor();
 
-    if (!_pointerInside) {
+    if (!_pointerInside && !_pointerButtonDown) {
       flushDeferredUpdate();
     }
   }
 
   function handlePointerUp(e: PointerEvent) {
+    _pointerButtonDown = false;
     stopPanning(e.pointerId);
+    scheduleIgnoredSelectionReset();
   }
 
   function handlePointerCancel(e: PointerEvent) {
+    _pointerButtonDown = false;
     stopPanning(e.pointerId);
+    scheduleIgnoredSelectionReset();
   }
 
   function initChart() {
@@ -854,7 +933,7 @@
   function pollDataUpdates() {
     if (chart && wrapper) {
       syncScaleRef();
-      if (_scaleRef.xMode === 'manual') {
+      if (!usesPyqtgraphInteraction() && _scaleRef.xMode === 'manual') {
         return;
       }
 
@@ -876,6 +955,8 @@
     renderPollTimer = window.setInterval(pollDataUpdates, 75);
 
     let resizeRaf: number | null = null;
+    let lastResizeWidth = 0;
+    let lastResizeHeight = 0;
     const handleResize = () => {
       if (!wrapper) return;
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
@@ -885,6 +966,13 @@
         const w = Math.floor(rect.width);
         const h = Math.floor(rect.height);
         if (w <= 10 || h <= 10) return;
+
+        if (Math.abs(lastResizeWidth - w) <= 1 && Math.abs(lastResizeHeight - h) <= 1) {
+          return;
+        }
+
+        lastResizeWidth = w;
+        lastResizeHeight = h;
 
         const nextLayoutMode = resolveLayoutMode(h);
         const shouldRebuild = !chart || nextLayoutMode !== lastLayoutMode;
@@ -899,27 +987,47 @@
           return;
         }
 
-        chart.setSize({ width: w, height: h });
-        updateChart();
+        if (Math.abs(chart.width - w) > 2 || Math.abs(chart.height - h) > 2) {
+          chart.setSize({ width: w, height: h });
+        }
+        lastLayoutMode = nextLayoutMode;
       });
     };
 
     const ro = new ResizeObserver(() => {
       handleResize();
     });
+    const handleGlobalPointerRelease = () => {
+      if (!_pointerButtonDown && !_ignoreNextSelection) {
+        return;
+      }
+
+      _pointerButtonDown = false;
+      scheduleIgnoredSelectionReset();
+
+      if (!_panning && !_pointerInside) {
+        resetWrapperCursor();
+        flushDeferredUpdate();
+      }
+    };
+
     if (wrapper) ro.observe(wrapper);
-    if (wrapper?.parentElement) ro.observe(wrapper.parentElement);
     window.addEventListener('resize', handleResize, { passive: true });
+    window.addEventListener('pointerup', handleGlobalPointerRelease, { passive: true });
+    window.addEventListener('pointercancel', handleGlobalPointerRelease, { passive: true });
     return () => {
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       ro.disconnect();
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('pointerup', handleGlobalPointerRelease);
+      window.removeEventListener('pointercancel', handleGlobalPointerRelease);
     };
   });
 
   onDestroy(() => {
     if (renderPollTimer) window.clearInterval(renderPollTimer);
     if (rangeChangeRaf !== null) cancelAnimationFrame(rangeChangeRaf);
+    if (clearIgnoredSelectionRaf !== null) cancelAnimationFrame(clearIgnoredSelectionRaf);
     if (chart) {
       chart.destroy();
       chart = null;
@@ -927,7 +1035,16 @@
   });
 
   $effect(() => {
-    const _ = [config.yMode, config.showGrid, theme, seriesVisualSignature, showYAxis, xAxisMode];
+    const _ = [
+      config.yMode,
+      config.showGrid,
+      theme,
+      seriesVisualSignature,
+      showYAxis,
+      xAxisMode,
+      interactiveYAxis,
+      interactionProfile,
+    ];
     untrack(() => {
       if (_mounted && chart) initChart();
     });
@@ -1004,18 +1121,21 @@
 <div
   bind:this={wrapper}
   class="plotly-surface w-full h-full uplot-wrapper"
+  class:plotly-surface--pyqtgraph={usesPyqtgraphInteraction()}
+  class:plotly-surface--panning={_panning}
   style="background: {colors.bg};"
   onwheel={handleWheel}
   onpointerdown={handlePointerDown}
   onpointermove={handlePointerMove}
   onpointerup={handlePointerUp}
   onpointercancel={handlePointerCancel}
+  ondblclick={handleDoubleClick}
   onpointerenter={() => {
     _pointerInside = true;
   }}
   onpointerleave={() => {
     _pointerInside = false;
-    if (!_panning) {
+    if (!_panning && !_pointerButtonDown) {
       resetWrapperCursor();
       flushDeferredUpdate();
     }
@@ -1035,6 +1155,9 @@
   }
   .uplot-wrapper :global(.u-over) {
     cursor: crosshair !important;
+  }
+  .plotly-surface--panning :global(.u-over) {
+    cursor: grabbing !important;
   }
   .uplot-wrapper :global(.u-legend) {
     display: none !important;

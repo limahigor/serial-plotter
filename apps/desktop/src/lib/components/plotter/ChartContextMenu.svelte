@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { Palette, Eye, EyeOff } from 'lucide-svelte';
-  import type { XAxisMode } from '$lib/types/chart';
+  import type { ChartScaleState, XAxisMode } from '$lib/types/chart';
 
   interface SeriesControl {
     key: string;
@@ -9,6 +9,14 @@
     color: string;
     visible: boolean;
   }
+
+  type MenuChartState = ChartScaleState & {
+    visible?: {
+      pv: boolean;
+      sp: boolean;
+      mv: boolean;
+    };
+  };
 
   let {
     visible = $bindable(false),
@@ -26,7 +34,7 @@
     visible: boolean;
     x: number;
     y: number;
-    chartState: any;
+    chartState: MenuChartState;
     lineColors?: { pv: string; sp: string; mv: string };
     seriesControls?: SeriesControl[];
     seriesTitle?: string;
@@ -41,6 +49,16 @@
   );
 
   let autoCloseTimer: number | null = null;
+  const numericInputClass =
+    'w-full h-6 text-xs bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded px-1';
+
+  function modeButtonClass(active: boolean) {
+    return `flex-1 text-[10px] font-bold py-1 px-2 rounded border transition-colors ${
+      active
+        ? 'bg-blue-600 text-white border-blue-600'
+        : 'bg-slate-50 dark:bg-white/5 text-slate-500 border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'
+    }`;
+  }
 
   function clearAutoCloseTimer() {
     if (autoCloseTimer !== null) {
@@ -96,9 +114,9 @@
         Eixo X (Tempo) <span class="text-[9px] bg-slate-100 dark:bg-white/5 px-1 rounded">{chartState.xMode}</span>
       </div>
       <div class="flex gap-1 mb-1">
-        <button onclick={() => onSetXAxisMode?.('auto')} class={`flex-1 text-[10px] font-bold py-1 px-2 rounded border transition-colors ${chartState.xMode === 'auto' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 dark:bg-white/5 text-slate-500 border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'}`}>Auto</button>
-        <button onclick={() => onSetXAxisMode?.('sliding')} class={`flex-1 text-[10px] font-bold py-1 px-2 rounded border transition-colors ${chartState.xMode === 'sliding' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 dark:bg-white/5 text-slate-500 border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'}`}>Janela</button>
-        <button onclick={() => onSetXAxisMode?.('manual')} class={`flex-1 text-[10px] font-bold py-1 px-2 rounded border transition-colors ${chartState.xMode === 'manual' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 dark:bg-white/5 text-slate-500 border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'}`}>Manual</button>
+        <button onclick={() => onSetXAxisMode?.('auto')} class={modeButtonClass(chartState.xMode === 'auto')}>Auto</button>
+        <button onclick={() => onSetXAxisMode?.('sliding')} class={modeButtonClass(chartState.xMode === 'sliding')}>Janela</button>
+        <button onclick={() => onSetXAxisMode?.('manual')} class={modeButtonClass(chartState.xMode === 'manual')}>Manual</button>
       </div>
       {#if chartState.xMode === 'sliding'}
         <div class="flex items-center gap-2 px-1">
@@ -143,8 +161,10 @@
         {:else if lineColors}
           <div class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-slate-100 dark:hover:bg-white/5 group">
             <div class="flex items-center gap-2">
-              <button onclick={() => chartState.visible.pv = !chartState.visible.pv} class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
-                {#if chartState.visible.pv}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+              <button onclick={() => {
+                if (chartState.visible) chartState.visible.pv = !chartState.visible.pv;
+              }} class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+                {#if chartState.visible?.pv ?? true}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
               </button>
               <span class="text-xs text-slate-500 dark:text-slate-400 font-medium">PV (Process)</span>
             </div>
@@ -157,8 +177,10 @@
           </div>
           <div class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-slate-100 dark:hover:bg-white/5 group">
             <div class="flex items-center gap-2">
-              <button onclick={() => chartState.visible.sp = !chartState.visible.sp} class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
-                {#if chartState.visible.sp}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+              <button onclick={() => {
+                if (chartState.visible) chartState.visible.sp = !chartState.visible.sp;
+              }} class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+                {#if chartState.visible?.sp ?? true}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
               </button>
               <span class="text-xs text-slate-500 dark:text-slate-400 font-medium">SP (Setpoint)</span>
             </div>
@@ -171,8 +193,10 @@
           </div>
           <div class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-slate-100 dark:hover:bg-white/5 group">
             <div class="flex items-center gap-2">
-              <button onclick={() => chartState.visible.mv = !chartState.visible.mv} class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
-                {#if chartState.visible.mv}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+              <button onclick={() => {
+                if (chartState.visible) chartState.visible.mv = !chartState.visible.mv;
+              }} class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors">
+                {#if chartState.visible?.mv ?? true}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
               </button>
               <span class="text-xs text-slate-500 dark:text-slate-400 font-medium">MV (Output)</span>
             </div>
@@ -189,16 +213,32 @@
     <div class="border-t border-slate-100 dark:border-white/5"></div>
     <div>
       <div class="px-1 text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-1 flex justify-between items-center">
-        Eixo Y <span class="text-[9px] bg-slate-100 dark:bg-white/5 px-1 rounded">{chartState.yMode}</span>
+        Y Sensor <span class="text-[9px] bg-slate-100 dark:bg-white/5 px-1 rounded">{chartState.sensorYMode}</span>
       </div>
       <div class="flex gap-1 mb-2">
-        <button onclick={() => chartState.yMode = 'auto'} class={`flex-1 text-[10px] font-bold py-1 px-2 rounded border transition-colors ${chartState.yMode === 'auto' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 dark:bg-white/5 text-slate-500 border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'}`}>Auto</button>
-        <button onclick={() => chartState.yMode = 'manual'} class={`flex-1 text-[10px] font-bold py-1 px-2 rounded border transition-colors ${chartState.yMode === 'manual' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 dark:bg-white/5 text-slate-500 border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'}`}>Manual</button>
+        <button onclick={() => chartState.sensorYMode = 'auto'} class={modeButtonClass(chartState.sensorYMode === 'auto')}>Auto</button>
+        <button onclick={() => chartState.sensorYMode = 'manual'} class={modeButtonClass(chartState.sensorYMode === 'manual')}>Manual</button>
       </div>
-      {#if chartState.yMode === 'manual'}
+      {#if chartState.sensorYMode === 'manual'}
         <div class="flex gap-2 px-1">
-          <input type="number" placeholder="Min" class="w-full h-6 text-xs bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded px-1" bind:value={chartState.yMin} />
-          <input type="number" placeholder="Max" class="w-full h-6 text-xs bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded px-1" bind:value={chartState.yMax} />
+          <input type="number" placeholder="Min" class={numericInputClass} bind:value={chartState.sensorYMin} />
+          <input type="number" placeholder="Max" class={numericInputClass} bind:value={chartState.sensorYMax} />
+        </div>
+      {/if}
+    </div>
+    <div class="border-t border-slate-100 dark:border-white/5"></div>
+    <div>
+      <div class="px-1 text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-1 flex justify-between items-center">
+        Y Atuadores <span class="text-[9px] bg-slate-100 dark:bg-white/5 px-1 rounded">{chartState.actuatorYMode}</span>
+      </div>
+      <div class="flex gap-1 mb-2">
+        <button onclick={() => chartState.actuatorYMode = 'auto'} class={modeButtonClass(chartState.actuatorYMode === 'auto')}>Auto</button>
+        <button onclick={() => chartState.actuatorYMode = 'manual'} class={modeButtonClass(chartState.actuatorYMode === 'manual')}>Manual</button>
+      </div>
+      {#if chartState.actuatorYMode === 'manual'}
+        <div class="flex gap-2 px-1">
+          <input type="number" placeholder="Min" class={numericInputClass} bind:value={chartState.actuatorYMin} />
+          <input type="number" placeholder="Max" class={numericInputClass} bind:value={chartState.actuatorYMax} />
         </div>
       {/if}
     </div>

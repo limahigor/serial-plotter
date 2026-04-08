@@ -3,11 +3,14 @@
 /**
  * @typedef {{
  *   xMode: 'auto' | 'sliding' | 'manual',
- *   yMode: 'auto' | 'manual',
  *   xMin: number | null,
  *   xMax: number | null,
- *   yMin: number,
- *   yMax: number,
+ *   sensorYMode: 'auto' | 'manual',
+ *   sensorYMin: number,
+ *   sensorYMax: number,
+ *   actuatorYMode: 'auto' | 'manual',
+ *   actuatorYMin: number,
+ *   actuatorYMax: number,
  *   windowSize: number,
  * }} ChartScaleState
  */
@@ -56,13 +59,39 @@
 function createDefaultChartScaleState() {
   return /** @type {ChartScaleState} */ ({
     xMode: 'auto',
-    yMode: 'auto',
     xMin: null,
     xMax: null,
-    yMin: 0,
-    yMax: 100,
+    sensorYMode: 'auto',
+    sensorYMin: 0,
+    sensorYMax: 100,
+    actuatorYMode: 'manual',
+    actuatorYMin: 0,
+    actuatorYMax: 100,
     windowSize: 30,
   });
+}
+
+/**
+ * @param {Partial<ChartScaleState> | undefined} state
+ * @returns {ChartScaleState}
+ */
+function normalizeChartScaleState(state) {
+  if (
+    state &&
+    'sensorYMode' in state &&
+    'sensorYMin' in state &&
+    'sensorYMax' in state &&
+    'actuatorYMode' in state &&
+    'actuatorYMin' in state &&
+    'actuatorYMax' in state
+  ) {
+    return /** @type {ChartScaleState} */ (state);
+  }
+
+  return {
+    ...createDefaultChartScaleState(),
+    ...state,
+  };
 }
 
 /**
@@ -137,7 +166,11 @@ export function buildSyncedChartScaleStates(currentStates, sensorIndices) {
   for (const sensorIndex of sensorIndices) {
     const currentState = existingStates[sensorIndex];
     if (currentState) {
-      nextStates[sensorIndex] = currentState;
+      const normalizedState = normalizeChartScaleState(currentState);
+      nextStates[sensorIndex] = normalizedState;
+      if (normalizedState !== currentState) {
+        changed = true;
+      }
     } else {
       nextStates[sensorIndex] = createDefaultChartScaleState();
       changed = true;
@@ -267,7 +300,7 @@ export function updateScaleStateMap(
   updater,
 ) {
   const currentStates = chartScaleStatesByPlant[plantId] ?? {};
-  const currentState = currentStates[variableIndex] ?? createDefaultChartScaleState();
+  const currentState = normalizeChartScaleState(currentStates[variableIndex]);
 
   return {
     ...chartScaleStatesByPlant,
@@ -286,15 +319,17 @@ export function resetPlantZoomState(chartScaleStatesByPlant, plantId) {
   const currentStates = chartScaleStatesByPlant[plantId] ?? {};
   /** @type {Record<number, ChartScaleState>} */
   const nextPlantStates = Object.fromEntries(
-    Object.entries(currentStates).map(([key, state]) => [
-      Number(key),
-      /** @type {ChartScaleState} */ ({
-        ...state,
-        xMode: 'auto',
-        xMin: null,
-        xMax: null,
-      }),
-    ]),
+    Object.entries(currentStates).map(([key, state]) => {
+      const normalizedState = normalizeChartScaleState(state);
+      return [
+        Number(key),
+        /** @type {ChartScaleState} */ ({
+          ...createDefaultChartScaleState(),
+          ...normalizedState,
+          windowSize: normalizedState.windowSize,
+        }),
+      ];
+    }),
   );
 
   return {
@@ -313,13 +348,13 @@ export function buildChartConfigsByVariableIndex(sensorEntries, activeChartScale
   const configs = {};
 
   for (const sensorEntry of sensorEntries) {
-    const scaleState = activeChartScaleStates[sensorEntry.index] ?? createDefaultChartScaleState();
+    const scaleState = normalizeChartScaleState(activeChartScaleStates[sensorEntry.index]);
 
     configs[sensorEntry.index] = {
       pvConfig: {
-        yMin: scaleState.yMin,
-        yMax: scaleState.yMax,
-        yMode: scaleState.yMode,
+        yMin: scaleState.sensorYMin,
+        yMax: scaleState.sensorYMax,
+        yMode: scaleState.sensorYMode,
         xMode: scaleState.xMode,
         windowSize: scaleState.windowSize,
         xMin: scaleState.xMin,
@@ -328,9 +363,9 @@ export function buildChartConfigsByVariableIndex(sensorEntries, activeChartScale
         showHover: true,
       },
       mvConfig: {
-        yMin: 0,
-        yMax: 100,
-        yMode: 'manual',
+        yMin: scaleState.actuatorYMin,
+        yMax: scaleState.actuatorYMax,
+        yMode: scaleState.actuatorYMode,
         xMode: scaleState.xMode,
         windowSize: scaleState.windowSize,
         xMin: scaleState.xMin,
@@ -381,7 +416,7 @@ export function resolveContextMenuPosition(
   container,
   event,
   menuWidth = 250,
-  menuHeight = 360,
+  menuHeight = 460,
 ) {
   if (!container) {
     return null;

@@ -31,6 +31,10 @@
     liveTick?: number;
     onRangeChange?: (xMin: number, xMax: number) => void;
     onViewportChange?: (viewport: { xMin: number; xMax: number; yMin: number; yMax: number }) => void;
+    onActuatorViewportChange?: (
+      viewport: { xMin: number; xMax: number; yMin: number; yMax: number }
+    ) => void;
+    onResetViewport?: () => void;
   }
 
   let {
@@ -52,6 +56,8 @@
     liveTick = 0,
     onRangeChange,
     onViewportChange,
+    onActuatorViewportChange,
+    onResetViewport,
   }: Props = $props();
 
   type CardLayoutMode = 'regular' | 'compact' | 'tight' | 'collapsed';
@@ -349,7 +355,10 @@
         config={pvConfig}
         {theme}
         xAxisMode={sensorXAxisMode}
+        interactionProfile="pyqtgraph"
         {onViewportChange}
+        {onRangeChange}
+        {onResetViewport}
         interactiveYAxis={true}
       />
     </div>
@@ -362,7 +371,11 @@
           config={mvConfig}
           {theme}
           xAxisMode="full"
+          interactionProfile="pyqtgraph"
           {onRangeChange}
+          onViewportChange={onActuatorViewportChange}
+          {onResetViewport}
+          interactiveYAxis={true}
         />
       </div>
     {/if}

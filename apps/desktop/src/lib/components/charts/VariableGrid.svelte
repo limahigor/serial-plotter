@@ -19,6 +19,11 @@
       variableIndex: number,
       viewport: { xMin: number; xMax: number; yMin: number; yMax: number }
     ) => void;
+    onActuatorViewportChange?: (
+      variableIndex: number,
+      viewport: { xMin: number; xMax: number; yMin: number; yMax: number }
+    ) => void;
+    onResetViewport?: (variableIndex: number) => void;
   }
 
   interface LinkedActuatorEntry {
@@ -66,6 +71,8 @@
     variableStats = [],
     onRangeChange,
     onViewportChange,
+    onActuatorViewportChange,
+    onResetViewport,
   }: Props = $props();
   let liveStatsTick = $state(0);
 
@@ -178,6 +185,12 @@
           : undefined}
         onViewportChange={onViewportChange
           ? (viewport) => onViewportChange(sensorEntry.originalIndex, viewport)
+          : undefined}
+        onActuatorViewportChange={onActuatorViewportChange
+          ? (viewport) => onActuatorViewportChange(sensorEntry.originalIndex, viewport)
+          : undefined}
+        onResetViewport={onResetViewport
+          ? () => onResetViewport(sensorEntry.originalIndex)
           : undefined}
       />
     </div>

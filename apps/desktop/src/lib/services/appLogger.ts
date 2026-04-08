@@ -77,7 +77,20 @@ function createLogger(level: ConsoleLogLevel, sink: (...args: unknown[]) => void
   };
 }
 
+function isIgnorableBrowserResizeObserverError(message: string | undefined | null) {
+  if (!message) {
+    return false;
+  }
+
+  return message === 'ResizeObserver loop completed with undelivered notifications.'
+    || message === 'ResizeObserver loop limit exceeded';
+}
+
 function handleWindowError(event: ErrorEvent) {
+  if (isIgnorableBrowserResizeObserverError(event.message)) {
+    return;
+  }
+
   void appendConsoleLog({
     level: 'error',
     message: event.message || 'Erro não tratado no frontend',
