@@ -749,7 +749,12 @@
         <input
           bind:value={searchDraft}
           onkeydown={handleSearchKeydown}
-          class="h-9 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none transition focus:border-slate-400 focus:bg-white dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-500"
+          class={`console-search-input h-9 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:bg-white dark:border-white/10 dark:bg-zinc-950 dark:placeholder:text-zinc-500 dark:focus:border-zinc-500 ${
+            searchDraft.trim().length > 0
+              ? 'font-medium'
+              : ''
+          }`}
+          style={`--console-search-text: ${isLightTheme ? '#000000' : '#f4f4f5'}; --console-search-selection-bg: ${isLightTheme ? '#0f172a' : '#f4f4f5'}; --console-search-selection-text: ${isLightTheme ? '#ffffff' : '#09090b'}; --console-search-focus-bg: #000000; --console-search-focus-text: #ffffff; --console-search-focus-border: #000000; color: var(--console-search-text); -webkit-text-fill-color: var(--console-search-text); caret-color: var(--console-search-text);`}
           placeholder="Buscar por mensagem, planta, plugin ou controlador (Enter para aplicar)"
         />
 
@@ -1068,8 +1073,38 @@
                   </button>
                 {/if}
               </div>
-            </div>
-          </section>
+  </div>
+</section>
+
+<style>
+  .console-search-input,
+  .console-search-input:focus,
+  .console-search-input:active {
+    color: var(--console-search-text) !important;
+    -webkit-text-fill-color: var(--console-search-text) !important;
+    caret-color: var(--console-search-text) !important;
+  }
+
+  .console-search-input:focus,
+  .console-search-input:active {
+    background: var(--console-search-focus-bg) !important;
+    border-color: var(--console-search-focus-border) !important;
+    color: var(--console-search-focus-text) !important;
+    -webkit-text-fill-color: var(--console-search-focus-text) !important;
+    caret-color: var(--console-search-focus-text) !important;
+  }
+
+  .console-search-input:focus::placeholder,
+  .console-search-input:active::placeholder {
+    color: rgba(255, 255, 255, 0.58);
+  }
+
+  .console-search-input::selection {
+    background: var(--console-search-selection-bg);
+    color: var(--console-search-selection-text);
+    -webkit-text-fill-color: var(--console-search-selection-text);
+  }
+</style>
 
           <section class="rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-3 dark:border-white/10 dark:bg-[#121215]">
             <div class="flex items-center justify-between gap-3">
